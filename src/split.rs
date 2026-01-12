@@ -542,26 +542,6 @@ impl SplitRule {
     }
 }
 
-fn ts_to_sec_nsec(ts_high: u32, ts_low: u32, if_tsresol: u8) -> (i64, u32) {
-    let ts64: u64 = ((ts_high as u64) << 32) | (ts_low as u64);
-
-    let is_binary = (if_tsresol & 0x80) != 0;
-    let r = (if_tsresol & 0x7f) as u32;
-
-    // tick = numerator / denominator
-    let (numerator, denominator): (u128, u128) = if is_binary {
-        (1_000_000_000u128, 1u128 << r)
-    } else {
-        (1_000_000_000u128, 10u128.pow(r))
-    };
-
-    let total_ns: u128 = (ts64 as u128) * numerator / denominator;
-
-    let sec: i64 = (total_ns / 1_000_000_000u128) as i64;
-    let nsec: u32 = (total_ns % 1_000_000_000u128) as u32;
-    (sec, nsec)
-}
-
 fn parse_tcp_flag(tcp_flags: u8) -> String {
     let mut flags = Vec::new();
     if tcp_flags & 0x01 != 0 {
@@ -592,15 +572,18 @@ fn print_tcp(msg: &str, src_addr: IpAddr, dst_addr: IpAddr, payload: &[u8]) {
         let dst_port = tcp_packet.get_destination();
         let tcp_flags = tcp_packet.get_flags();
         let tcp_flags_str = parse_tcp_flag(tcp_flags);
+        let seq = tcp_packet.get_sequence();
+        let seq_end = seq + tcp_packet.payload().len() as u32;
         println!(
-            "{} {}.{} > {}.{}, TCP: Flags [{}], seq {}, ack {}, win {}, length {}",
+            "{} {}.{} > {}.{}, TCP: Flags [{}], seq {}:{}, ack {}, win {}, length {}",
             msg,
             src_addr,
             src_port,
             dst_addr,
             dst_port,
             tcp_flags_str,
-            tcp_packet.get_sequence(),
+            seq,
+            seq_end,
             tcp_packet.get_acknowledgement(),
             tcp_packet.get_window(),
             tcp_packet.payload().len()
@@ -684,10 +667,90 @@ fn print_ethernet(msg: &str, payload: &[u8]) {
     }
 }
 
+fn ts_to_sec_nsec(ts_high: u32, ts_low: u32, if_tsresol: u8) -> (i64, u32) {
+    let ts64: u64 = ((ts_high as u64) << 32) | (ts_low as u64);
+
+    let is_binary = (if_tsresol & 0x80) != 0;
+    let r = (if_tsresol & 0x7f) as u32;
+
+    // tick = numerator / denominator
+    let (numerator, denominator): (u128, u128) = if is_binary {
+        (1_000_000_000u128, 1u128 << r)
+    } else {
+        (1_000_000_000u128, 10u128.pow(r))
+    };
+
+    let total_ns: u128 = (ts64 as u128) * numerator / denominator;
+
+    let sec: i64 = (total_ns / 1_000_000_000u128) as i64;
+    let nsec: u32 = (total_ns % 1_000_000_000u128) as u32;
+    (sec, nsec)
+}
+
+struct PacketTimePrinter {
+    dont_print_timestamp: bool,                  // -t
+    print_unix_epoch_time: bool,                 // -tt
+    print_delta_time_from_previous_packet: bool, // -ttt
+    print_hunan_readable_time: bool,             // -tttt
+    print_deta_time_from_first_packet: bool,     // -ttttt
+}
+
+impl Default for PacketTimePrinter {
+    fn default() -> Self {
+        Self {
+            dont_print_timestamp: false,
+            print_unix_epoch_time: false,
+            print_delta_time_from_previous_packet: false,
+            print_hunan_readable_time: false,
+            print_deta_time_from_first_packet: false,
+        }
+    }
+}
+
+impl PacketTimePrinter {
+    fn print_1(&self) -> String {
+        String::new()
+    }
+    fn print_2(&self, ts_high: u32, ts_low: u32) -> String {
+        // the default value of xxpdump
+        let if_tsresol: u8 = 6;
+        let (ts_sec, ts_nsec) = ts_to_sec_nsec(ts_high, ts_low, if_tsresol);
+        let time_str = format!("{}.{:06}", ts_sec, ts_nsec);
+        time_str
+    }
+    fn print_3(&self, ts_high: u32, ts_low: u32) -> String {
+        // the default value of xxpdump
+        let if_tsresol: u8 = 6;
+        let (ts_sec, ts_nsec) = ts_to_sec_nsec(ts_high, ts_low, if_tsresol);
+        let dt = if let Some(dt) = Local.timestamp_opt(ts_sec, ts_nsec).single() {
+            dt
+        } else {
+            DateTime::from(Local::now())
+        };
+        let ts_usec = ts_nsec / 1_000;
+        let time_str = format!("{}.{}", dt.format("%Y-%m-%d %H:%M:%S"), ts_usec);
+        time_str
+    }
+    fn print_4(&self, ts_high: u32, ts_low: u32) -> String {
+        // the default value of xxpdump
+        let if_tsresol: u8 = 6;
+        let (ts_sec, ts_nsec) = ts_to_sec_nsec(ts_high, ts_low, if_tsresol);
+
+        let dt = if let Some(dt) = Local.timestamp_opt(ts_sec, ts_nsec).single() {
+            dt
+        } else {
+            DateTime::from(Local::now())
+        };
+        let ts_usec = ts_nsec / 1_000;
+        let time_str = format!("{}.{:06}", dt.format("%H:%M:%S"), ts_usec);
+        time_str
+    }
+}
+
+struct PacketPrinter;
+
 fn print_packet(block: GeneralBlock) {
-    // example:
-    // 12:34:56.789012 IP 192.168.1.10.54321 > 93.184.216.34.80: Flags [S], seq 123, win 64240, options [...], length 0
-    // from my tcpdump output:
+    // from my tcpdump (version: 4.99.5) output:
     // 16:04:23.412830 IP 192.168.5.136.50720 > 36.110.219.249.https: Flags [.], ack 71540, win 64240, length 0
     // 16:04:23.414623 IP 192.168.5.136.50618 > 36.110.219.249.https: Flags [.], ack 45260, win 64240, length 0
     // 16:04:23.415451 IP 36.110.219.249.https > 192.168.5.136.50722: Flags [P.], seq 48180:49640, ack 1, win 64240, length 1460
@@ -701,24 +764,13 @@ fn print_packet(block: GeneralBlock) {
     // 16:04:23.419780 IP 192.168.5.136.50796 > 36.110.219.249.https: Flags [.], ack 45260, win 64240, length 0
     // 16:04:23.420987 IP 36.110.219.249.https > 192.168.5.136.50796: Flags [P.], seq 45260:46720, ack 1, win 64240, length 1460
     // program output:
-    // 22:34:23.838757 IP: 192.168.5.1.50966 > 192.168.5.3.22 TCP: Flags [P.], seq 2709816865, ack 1664830852, win 1018, length 188
-    // 22:34:23.839431 IP: 192.168.5.3.22 > 192.168.5.1.50966 TCP: Flags [P.], seq 1664830852, ack 2709817053, win 9663, length 100
-    // 22:34:23.865925 IP: 192.168.5.1.50966 > 192.168.5.3.22 TCP: Flags [P.], seq 2709817053, ack 1664830952, win 1023, length 172
-    // 22:34:23.866733 IP: 192.168.5.3.22 > 192.168.5.1.50966 TCP: Flags [P.], seq 1664830952, ack 2709817225, win 9663, length 284
+    // 11:51:39.979805 IP: 192.168.5.3.22 > 192.168.5.1.55981, TCP: Flags [P.], seq 2406649272:2406649364, ack 2364440282, win 9836, length 92
+    // 11:51:40.021937 IP: 192.168.5.3.22 > 192.168.5.1.55981, TCP: Flags [P.], seq 2406649364:2406649464, ack 2364440282, win 9836, length 100
+    // 11:51:40.022391 IP: 192.168.5.1.55981 > 192.168.5.3.22, TCP: Flags [.], seq 2364440282:2364440282, ack 2406649464, win 1023, length 0
     match block {
         GeneralBlock::EnhancedPacketBlock(epb) => {
             let ts_high = epb.ts_high;
             let ts_low = epb.ts_low;
-            let if_tsresol: u8 = 6;
-            let (ts_sec, ts_nsec) = ts_to_sec_nsec(ts_high, ts_low, if_tsresol);
-
-            let dt = Local
-                .timestamp_opt(ts_sec, ts_nsec)
-                .single()
-                .unwrap_or_else(|| DateTime::from(Local::now()));
-            let ts_usec = ts_nsec / 1_000;
-            let time_str = format!("{}.{:06}", dt.format("%H:%M:%S"), ts_usec);
-
             let data = epb.packet_data;
             print_ethernet(&time_str, &data);
         }
