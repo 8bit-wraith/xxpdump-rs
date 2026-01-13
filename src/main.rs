@@ -4,6 +4,8 @@ use bincode::Decode;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use bincode::Encode;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
+use clap::ArgAction;
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use clap::Parser;
 #[cfg(feature = "libpnet")]
 use pcapture;
@@ -100,7 +102,7 @@ struct Args {
     immediate: bool,
 
     /// Set the read timeout for the capture, by default, this is 0 so it will block indefinitely
-    #[arg(short = 't', long, default_value_t = 0.1)]
+    #[arg(short = 'T', long, default_value_t = 0.5)]
     timeout: f32,
 
     /// Set the filter when saving the packet, e.g. --filter ip=192.168.1.1 and port=80, please use --filter-examples to show more examples
@@ -142,6 +144,18 @@ struct Args {
     /// Ignore capture server traffic (this is useful when the remote address is an IP address instead of a domain name, when the remote server is a domain name, please set the filter manually)
     #[arg(long, alias = "ist", action, default_value_t = true)]
     ignore_self_traffic: bool,
+
+    /// Set the print time mode, -t: no print; -tt: epoch; -ttt: delta previous packet; -tttt: human readable; -ttttt: delta first packet.
+    #[arg(short = 't', action=ArgAction::Count)]
+    print_time_mode: u8,
+
+    /// Show the raw sequence number and ack number in TCP packets
+    #[arg(short = 'S', long, action, default_value_t = false)]
+    show_raw_seq_ack: bool,
+
+    /// Show ethernet layer info
+    #[arg(short = 'e', long, action, default_value_t = false)]
+    show_ethernet: bool,
 }
 
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]

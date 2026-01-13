@@ -4,6 +4,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use chrono::DateTime;
+use chrono::Duration;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use chrono::Local;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
@@ -24,11 +25,17 @@ use pnet::packet::ethernet::EtherTypes;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use pnet::packet::ethernet::EthernetPacket;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
+use pnet::packet::icmp::IcmpPacket;
+use pnet::packet::icmp::IcmpTypes;
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
+use pnet::packet::ip::IpNextHeaderProtocol;
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use pnet::packet::ip::IpNextHeaderProtocols;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use pnet::packet::ipv4::Ipv4Packet;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use pnet::packet::ipv6::Ipv6Packet;
+use pnet::packet::tcp::Tcp;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use pnet::packet::tcp::TcpPacket;
 use pnet::packet::udp::UdpPacket;
@@ -384,7 +391,7 @@ pub enum SplitRule {
     FileSize(SplitRuleFileSize),
     Rotate(SplitRuleRotate),
     None(SplitRuleNone),
-    Print,
+    Print(PacketPrinter),
 }
 
 impl Drop for SplitRule {
@@ -402,7 +409,7 @@ impl Drop for SplitRule {
             Self::None(n) => {
                 n.write(true).expect("final write failed");
             }
-            Self::Print => (),
+            Self::Print(_) => (),
         }
     }
 }
@@ -487,7 +494,36 @@ impl SplitRule {
             }
         } else {
             // show the packets on terminal
-            let srp = SplitRule::Print;
+            let mut p = PacketPrinter::new();
+            match args.print_time_mode {
+                1 => p
+                    .time_printer
+                    .set_time_printer_mode(TimePrinterMode::NoPrint),
+                2 => p.time_printer.set_time_printer_mode(TimePrinterMode::Epoch),
+                3 => p
+                    .time_printer
+                    .set_time_printer_mode(TimePrinterMode::DeltaPrevious),
+                4 => p
+                    .time_printer
+                    .set_time_printer_mode(TimePrinterMode::HumanReadable),
+                5 => p
+                    .time_printer
+                    .set_time_printer_mode(TimePrinterMode::DeltaFirst),
+                _ => {
+                    // default mode (this value is assigned in PacketPrinter::new())
+                    // p.set_time_printer_mode(TimePrinterMode::HumanReadable);
+                }
+            }
+            match args.show_raw_seq_ack {
+                true => p.tcp_udp_printer.show_raw_seq_ack = true,
+                false => p.tcp_udp_printer.show_raw_seq_ack = false,
+            }
+            match args.show_ethernet {
+                true => p.ethernet_printer.show_ethernet = true,
+                false => p.ethernet_printer.show_ethernet = false,
+            }
+
+            let srp = SplitRule::Print(p);
             Ok(srp)
         }
     }
@@ -497,8 +533,8 @@ impl SplitRule {
             Self::FileSize(f) => f.append(block),
             Self::Rotate(r) => r.append(block),
             Self::None(n) => n.append(block),
-            Self::Print => {
-                print_packet(block);
+            Self::Print(p) => {
+                p.print(block);
                 // just show the packet info on terminal
                 Ok(())
             }
@@ -509,8 +545,7 @@ impl SplitRule {
             Self::Count(c) => c.shb = Some(shb),
             Self::FileSize(f) => f.shb = Some(shb),
             Self::Rotate(r) => r.shb = Some(shb),
-            Self::None(_) => (),
-            Self::Print => (),
+            _ => (),
         }
     }
     pub fn update_idb(&mut self, idb: InterfaceDescriptionBlock) {
@@ -536,205 +571,300 @@ impl SplitRule {
                     r.idbs = Some(vec![idb]);
                 }
             }
-            Self::None(_) => (),
-            Self::Print => (),
-        }
-    }
-}
-
-fn parse_tcp_flag(tcp_flags: u8) -> String {
-    let mut flags = Vec::new();
-    if tcp_flags & 0x01 != 0 {
-        flags.push("F");
-    }
-    if tcp_flags & 0x02 != 0 {
-        flags.push("S");
-    }
-    if tcp_flags & 0x04 != 0 {
-        flags.push("R");
-    }
-    if tcp_flags & 0x08 != 0 {
-        flags.push("P");
-    }
-    if tcp_flags & 0x10 != 0 {
-        // flags.push("A");
-        flags.push(".");
-    }
-    if tcp_flags & 0x20 != 0 {
-        flags.push("U");
-    }
-    flags.join("")
-}
-
-fn print_tcp(msg: &str, src_addr: IpAddr, dst_addr: IpAddr, payload: &[u8]) {
-    if let Some(tcp_packet) = TcpPacket::new(payload) {
-        let src_port = tcp_packet.get_source();
-        let dst_port = tcp_packet.get_destination();
-        let tcp_flags = tcp_packet.get_flags();
-        let tcp_flags_str = parse_tcp_flag(tcp_flags);
-        let seq = tcp_packet.get_sequence();
-        let seq_end = seq + tcp_packet.payload().len() as u32;
-        println!(
-            "{} {}.{} > {}.{}, TCP: Flags [{}], seq {}:{}, ack {}, win {}, length {}",
-            msg,
-            src_addr,
-            src_port,
-            dst_addr,
-            dst_port,
-            tcp_flags_str,
-            seq,
-            seq_end,
-            tcp_packet.get_acknowledgement(),
-            tcp_packet.get_window(),
-            tcp_packet.payload().len()
-        );
-    }
-}
-
-fn print_udp(msg: &str, src_addr: IpAddr, dst_addr: IpAddr, payload: &[u8]) {
-    if let Some(udp_packet) = UdpPacket::new(payload) {
-        let src_port = udp_packet.get_source();
-        let dst_port = udp_packet.get_destination();
-        println!(
-            "{} {}.{} > {}.{}, UDP: length {}",
-            msg,
-            src_addr,
-            src_port,
-            dst_addr,
-            dst_port,
-            udp_packet.payload().len()
-        );
-    }
-}
-
-fn print_ip(msg: &str, next_level_protocol: EtherType, payload: &[u8]) {
-    match next_level_protocol {
-        EtherTypes::Ipv4 => {
-            let msg = format!("{} IP:", msg);
-            if let Some(ipv4_packet) = Ipv4Packet::new(payload) {
-                let src_ipv4 = ipv4_packet.get_source();
-                let dst_ipv4 = ipv4_packet.get_destination();
-                match ipv4_packet.get_next_level_protocol() {
-                    IpNextHeaderProtocols::Tcp => {
-                        print_tcp(
-                            &msg,
-                            src_ipv4.into(),
-                            dst_ipv4.into(),
-                            ipv4_packet.payload(),
-                        );
-                    }
-                    IpNextHeaderProtocols::Udp => {
-                        print_udp(
-                            &msg,
-                            src_ipv4.into(),
-                            dst_ipv4.into(),
-                            ipv4_packet.payload(),
-                        );
-                    }
-                    _ => (),
-                }
-            }
-        }
-        EtherTypes::Ipv6 => {
-            let msg = format!("{} IP:", msg);
-            if let Some(ipv6_packet) = Ipv6Packet::new(payload) {
-                let src_ip = ipv6_packet.get_source();
-                let dst_ip = ipv6_packet.get_destination();
-                match ipv6_packet.get_next_header() {
-                    IpNextHeaderProtocols::Tcp => {
-                        print_tcp(&msg, src_ip.into(), dst_ip.into(), ipv6_packet.payload());
-                    }
-                    IpNextHeaderProtocols::Udp => {
-                        print_udp(&msg, src_ip.into(), dst_ip.into(), ipv6_packet.payload());
-                    }
-                    _ => (),
-                }
-            }
-        }
-        _ => (),
-    }
-}
-
-fn print_ethernet(msg: &str, payload: &[u8]) {
-    if let Some(ethernet_packet) = EthernetPacket::new(payload) {
-        let next_level_protocol = ethernet_packet.get_ethertype();
-        match next_level_protocol {
-            EtherTypes::Ipv4 | EtherTypes::Ipv6 => {
-                print_ip(msg, next_level_protocol, ethernet_packet.payload())
-            }
             _ => (),
         }
     }
 }
 
-fn ts_to_sec_nsec(ts_high: u32, ts_low: u32, if_tsresol: u8) -> (i64, u32) {
-    let ts64: u64 = ((ts_high as u64) << 32) | (ts_low as u64);
-
-    let is_binary = (if_tsresol & 0x80) != 0;
-    let r = (if_tsresol & 0x7f) as u32;
-
-    // tick = numerator / denominator
-    let (numerator, denominator): (u128, u128) = if is_binary {
-        (1_000_000_000u128, 1u128 << r)
-    } else {
-        (1_000_000_000u128, 10u128.pow(r))
-    };
-
-    let total_ns: u128 = (ts64 as u128) * numerator / denominator;
-
-    let sec: i64 = (total_ns / 1_000_000_000u128) as i64;
-    let nsec: u32 = (total_ns % 1_000_000_000u128) as u32;
-    (sec, nsec)
+#[derive(Debug, Clone, Copy)]
+pub struct TcpUdpPrinter {
+    first_seq: u32,
+    first_ack: u32,
+    show_raw_seq_ack: bool,
 }
 
+impl Default for TcpUdpPrinter {
+    fn default() -> Self {
+        Self {
+            first_seq: 0,
+            first_ack: 0,
+            show_raw_seq_ack: false,
+        }
+    }
+}
+
+impl TcpUdpPrinter {
+    fn parse_tcp_flag(self, tcp_flags: u8) -> String {
+        let mut flags = Vec::new();
+        if tcp_flags & 0x01 != 0 {
+            flags.push("F");
+        }
+        if tcp_flags & 0x02 != 0 {
+            flags.push("S");
+        }
+        if tcp_flags & 0x04 != 0 {
+            flags.push("R");
+        }
+        if tcp_flags & 0x08 != 0 {
+            flags.push("P");
+        }
+        if tcp_flags & 0x10 != 0 {
+            // flags.push("A");
+            flags.push(".");
+        }
+        if tcp_flags & 0x20 != 0 {
+            flags.push("U");
+        }
+        flags.join("")
+    }
+    fn normalize_seq(&self, seq: u32) -> u32 {
+        if self.show_raw_seq_ack {
+            seq
+        } else {
+            seq - self.first_seq
+        }
+    }
+    fn normalize_ack(&self, ack: u32) -> u32 {
+        if self.show_raw_seq_ack {
+            ack
+        } else {
+            ack - self.first_ack
+        }
+    }
+    fn print(&mut self, next_level_protocol: IpNextHeaderProtocol, payload: &[u8]) -> String {
+        match next_level_protocol {
+            IpNextHeaderProtocols::Tcp => {
+                if let Some(tcp_packet) = TcpPacket::new(payload) {
+                    let src_port = tcp_packet.get_source();
+                    let dst_port = tcp_packet.get_destination();
+                    let tcp_flags = tcp_packet.get_flags();
+                    let tcp_flags_str = self.parse_tcp_flag(tcp_flags);
+                    let seq_raw = tcp_packet.get_sequence();
+                    let ack_raw = tcp_packet.get_acknowledgement();
+
+                    if self.first_seq == 0 && self.first_ack == 0 {
+                        // set the first seq and ack
+                        // only set once
+                        self.first_seq = seq_raw;
+                        self.first_ack = ack_raw;
+                    }
+
+                    let seq = self.normalize_seq(seq_raw);
+                    let seq_end = seq + tcp_packet.payload().len() as u32;
+                    let ack = self.normalize_ack(ack_raw);
+
+                    let msg = format!(
+                        "TCP: {} > {}, Flags [{}], seq {}:{}, ack {}, win {}, length {}",
+                        src_port,
+                        dst_port,
+                        tcp_flags_str,
+                        seq,
+                        seq_end,
+                        ack,
+                        tcp_packet.get_window(),
+                        tcp_packet.payload().len()
+                    );
+                    return msg;
+                }
+            }
+            IpNextHeaderProtocols::Udp => {
+                if let Some(udp_packet) = UdpPacket::new(payload) {
+                    let src_port = udp_packet.get_source();
+                    let dst_port = udp_packet.get_destination();
+                    let msg = format!(
+                        "{} > {}, UDP: length {}",
+                        src_port,
+                        dst_port,
+                        udp_packet.payload().len()
+                    );
+                    return msg;
+                }
+            }
+            IpNextHeaderProtocols::Icmp | IpNextHeaderProtocols::Icmpv6 => {
+                let protocol_str = match next_level_protocol {
+                    IpNextHeaderProtocols::Icmp => "ICMP",
+                    IpNextHeaderProtocols::Icmpv6 => "ICMPv6",
+                    _ => "ICMP",
+                };
+                if let Some(icmp_packet) = IcmpPacket::new(payload) {
+                    let icmp_type = icmp_packet.get_icmp_type();
+                    let icmp_code = icmp_packet.get_icmp_code();
+                    let icmp_type_str = format!("{:?}", icmp_type);
+
+                    let msg = format!(
+                        "{}: type {}, code {}, length {}",
+                        protocol_str,
+                        icmp_type.0,
+                        icmp_code.0,
+                        icmp_packet.payload().len()
+                    );
+                    return msg;
+                }
+            }
+            _ => (),
+        }
+        String::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct IpPrinter {}
+
+impl Default for IpPrinter {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+impl IpPrinter {
+    fn print(
+        self,
+        next_level_protocol: EtherType,
+        payload: &[u8],
+    ) -> (String, Option<IpNextHeaderProtocol>, Vec<u8>) {
+        match next_level_protocol {
+            EtherTypes::Ipv4 => {
+                if let Some(ipv4_packet) = Ipv4Packet::new(payload) {
+                    let src_ip = ipv4_packet.get_source();
+                    let dst_ip = ipv4_packet.get_destination();
+                    let next_level_protocol = ipv4_packet.get_next_level_protocol();
+                    let msg = format!("IP: {} > {}", src_ip, dst_ip);
+                    let payload = ipv4_packet.payload();
+                    return (msg, Some(next_level_protocol), payload.to_vec());
+                }
+            }
+            EtherTypes::Ipv6 => {
+                if let Some(ipv6_packet) = Ipv6Packet::new(payload) {
+                    let src_ip = ipv6_packet.get_source();
+                    let dst_ip = ipv6_packet.get_destination();
+                    let next_level_protocol = ipv6_packet.get_next_header();
+                    let msg = format!("IP: {} > {}", src_ip, dst_ip);
+                    return (msg, Some(next_level_protocol), Vec::new());
+                }
+            }
+            _ => (),
+        }
+        (String::new(), None, Vec::new())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EthernetPrinter {
+    pub show_ethernet: bool,
+}
+
+impl Default for EthernetPrinter {
+    fn default() -> Self {
+        Self {
+            show_ethernet: false,
+        }
+    }
+}
+
+impl EthernetPrinter {
+    fn print(&self, payload: &[u8]) -> (String, Option<EtherType>, Vec<u8>) {
+        if let Some(ethernet_packet) = EthernetPacket::new(payload) {
+            let next_level_protocol = ethernet_packet.get_ethertype();
+            let src_mac = ethernet_packet.get_source();
+            let dst_mac = ethernet_packet.get_destination();
+            let payload = ethernet_packet.payload();
+            let msg = if self.show_ethernet {
+                format!(
+                    "ETH: {} > {}, type {}",
+                    src_mac, dst_mac, next_level_protocol,
+                )
+            } else {
+                String::new()
+            };
+            (msg, Some(next_level_protocol), payload.to_vec())
+        } else {
+            (String::new(), None, Vec::new())
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 struct PacketTimePrinter {
-    dont_print_timestamp: bool,                  // -t
-    print_unix_epoch_time: bool,                 // -tt
-    print_delta_time_from_previous_packet: bool, // -ttt
-    print_hunan_readable_time: bool,             // -tttt
-    print_deta_time_from_first_packet: bool,     // -ttttt
+    pub time_printer_mode: TimePrinterMode,
+    pub if_tsresol: u8,
+    // store previous packet time
+    pub pre_packet_time: Option<Duration>, // for -ttt
+    // store first packet time
+    pub first_packet_time: Option<Duration>, // for -ttttt
 }
 
 impl Default for PacketTimePrinter {
     fn default() -> Self {
         Self {
-            dont_print_timestamp: false,
-            print_unix_epoch_time: false,
-            print_delta_time_from_previous_packet: false,
-            print_hunan_readable_time: false,
-            print_deta_time_from_first_packet: false,
+            // default value
+            time_printer_mode: TimePrinterMode::HumanReadable,
+            // default value
+            if_tsresol: 6,
+            pre_packet_time: None,
+            first_packet_time: None,
         }
     }
 }
 
 impl PacketTimePrinter {
+    fn set_time_printer_mode(&mut self, mode: TimePrinterMode) {
+        self.time_printer_mode = mode;
+    }
+    fn ts_to_sec_nsec(&self, ts_high: u32, ts_low: u32, if_tsresol: u8) -> (i64, u32) {
+        let ts64: u64 = ((ts_high as u64) << 32) | (ts_low as u64);
+
+        let is_binary = (if_tsresol & 0x80) != 0;
+        let r = (if_tsresol & 0x7f) as u32;
+
+        // tick = numerator / denominator
+        let (numerator, denominator): (u128, u128) = if is_binary {
+            (1_000_000_000u128, 1u128 << r)
+        } else {
+            (1_000_000_000u128, 10u128.pow(r))
+        };
+
+        let total_ns: u128 = (ts64 as u128) * numerator / denominator;
+
+        let sec: i64 = (total_ns / 1_000_000_000u128) as i64;
+        let nsec: u32 = (total_ns % 1_000_000_000u128) as u32;
+        (sec, nsec)
+    }
+    /// Don't print timestamps.
     fn print_1(&self) -> String {
         String::new()
     }
+    /// Print Unix epoch time.
     fn print_2(&self, ts_high: u32, ts_low: u32) -> String {
-        // the default value of xxpdump
-        let if_tsresol: u8 = 6;
-        let (ts_sec, ts_nsec) = ts_to_sec_nsec(ts_high, ts_low, if_tsresol);
+        let (ts_sec, ts_nsec) = self.ts_to_sec_nsec(ts_high, ts_low, self.if_tsresol);
         let time_str = format!("{}.{:06}", ts_sec, ts_nsec);
         time_str
     }
-    fn print_3(&self, ts_high: u32, ts_low: u32) -> String {
-        // the default value of xxpdump
-        let if_tsresol: u8 = 6;
-        let (ts_sec, ts_nsec) = ts_to_sec_nsec(ts_high, ts_low, if_tsresol);
-        let dt = if let Some(dt) = Local.timestamp_opt(ts_sec, ts_nsec).single() {
-            dt
+    /// Print delta time between current and previous packet.
+    fn print_3(&mut self, ts_high: u32, ts_low: u32) -> String {
+        let (ts_sec, ts_nsec) = self.ts_to_sec_nsec(ts_high, ts_low, self.if_tsresol);
+        let current_duration = Duration::seconds(ts_sec) + Duration::nanoseconds(ts_nsec as i64);
+
+        let pre_duration = if let Some(fpt) = self.pre_packet_time {
+            fpt
         } else {
-            DateTime::from(Local::now())
+            self.pre_packet_time = Some(current_duration);
+            current_duration
         };
-        let ts_usec = ts_nsec / 1_000;
-        let time_str = format!("{}.{}", dt.format("%Y-%m-%d %H:%M:%S"), ts_usec);
+
+        self.pre_packet_time = Some(current_duration);
+        let delta = current_duration - pre_duration;
+        let sec = delta.num_seconds();
+        let nsec = if let Some(nsec) = (delta - Duration::seconds(sec)).num_nanoseconds() {
+            nsec
+        } else {
+            0
+        };
+        let time_str = format!("{}.{}", sec, format!("{:09}", nsec).trim_end_matches('0'));
         time_str
     }
+    /// Print human-readable date/time.
     fn print_4(&self, ts_high: u32, ts_low: u32) -> String {
-        // the default value of xxpdump
-        let if_tsresol: u8 = 6;
-        let (ts_sec, ts_nsec) = ts_to_sec_nsec(ts_high, ts_low, if_tsresol);
+        let (ts_sec, ts_nsec) = self.ts_to_sec_nsec(ts_high, ts_low, self.if_tsresol);
 
         let dt = if let Some(dt) = Local.timestamp_opt(ts_sec, ts_nsec).single() {
             dt
@@ -745,35 +875,128 @@ impl PacketTimePrinter {
         let time_str = format!("{}.{:06}", dt.format("%H:%M:%S"), ts_usec);
         time_str
     }
+    /// Print delta time since the first packet.
+    fn print_5(&mut self, ts_high: u32, ts_low: u32) -> String {
+        let (ts_sec, ts_nsec) = self.ts_to_sec_nsec(ts_high, ts_low, self.if_tsresol);
+        let current_duration = Duration::seconds(ts_sec) + Duration::nanoseconds(ts_nsec as i64);
+
+        let first_duration = if let Some(fpt) = self.first_packet_time {
+            fpt
+        } else {
+            self.first_packet_time = Some(current_duration);
+            current_duration
+        };
+        let delta = current_duration - first_duration;
+        let sec = delta.num_seconds();
+        let nsec = if let Some(nsec) = (delta - Duration::seconds(sec)).num_nanoseconds() {
+            nsec
+        } else {
+            0
+        };
+        let time_str = format!("{}.{}", sec, format!("{:09}", nsec).trim_end_matches('0'));
+        time_str
+    }
+    fn print(&mut self, ts_high: u32, ts_low: u32) -> String {
+        let msg = match self.time_printer_mode {
+            TimePrinterMode::NoPrint => self.print_1(),
+            TimePrinterMode::Epoch => self.print_2(ts_high, ts_low),
+            TimePrinterMode::DeltaPrevious => self.print_3(ts_high, ts_low),
+            TimePrinterMode::HumanReadable => self.print_4(ts_high, ts_low),
+            TimePrinterMode::DeltaFirst => self.print_5(ts_high, ts_low),
+        };
+        msg
+    }
 }
 
-struct PacketPrinter;
+#[derive(Debug, Clone, Copy)]
+pub enum TimePrinterMode {
+    NoPrint,
+    Epoch,
+    DeltaPrevious,
+    HumanReadable,
+    DeltaFirst,
+}
 
-fn print_packet(block: GeneralBlock) {
-    // from my tcpdump (version: 4.99.5) output:
-    // 16:04:23.412830 IP 192.168.5.136.50720 > 36.110.219.249.https: Flags [.], ack 71540, win 64240, length 0
-    // 16:04:23.414623 IP 192.168.5.136.50618 > 36.110.219.249.https: Flags [.], ack 45260, win 64240, length 0
-    // 16:04:23.415451 IP 36.110.219.249.https > 192.168.5.136.50722: Flags [P.], seq 48180:49640, ack 1, win 64240, length 1460
-    // 16:04:23.416183 IP 120.255.43.60.https > 192.168.5.136.50845: Flags [P.], seq 74460:77380, ack 1, win 64240, length 2920
-    // 16:04:23.416370 IP 192.168.5.136.50845 > 120.255.43.60.https: Flags [.], ack 77380, win 64240, length 0
-    // 16:04:23.418079 IP 36.110.219.249.https > 192.168.5.136.50618: Flags [P.], seq 45260:49640, ack 1, win 64240, length 4380
-    // 16:04:23.418268 IP 192.168.5.136.50618 > 36.110.219.249.https: Flags [.], ack 49640, win 64240, length 0
-    // 16:04:23.419536 IP 112.46.2.127.https > 192.168.5.136.50799: Flags [P.], seq 159140:164980, ack 1, win 64240, length 5840
-    // 16:04:23.419537 IP 36.110.219.249.https > 192.168.5.136.50796: Flags [P.], seq 36500:45260, ack 1, win 64240, length 8760
-    // 16:04:23.419780 IP 192.168.5.136.50799 > 112.46.2.127.https: Flags [.], ack 164980, win 64240, length 0
-    // 16:04:23.419780 IP 192.168.5.136.50796 > 36.110.219.249.https: Flags [.], ack 45260, win 64240, length 0
-    // 16:04:23.420987 IP 36.110.219.249.https > 192.168.5.136.50796: Flags [P.], seq 45260:46720, ack 1, win 64240, length 1460
-    // program output:
-    // 11:51:39.979805 IP: 192.168.5.3.22 > 192.168.5.1.55981, TCP: Flags [P.], seq 2406649272:2406649364, ack 2364440282, win 9836, length 92
-    // 11:51:40.021937 IP: 192.168.5.3.22 > 192.168.5.1.55981, TCP: Flags [P.], seq 2406649364:2406649464, ack 2364440282, win 9836, length 100
-    // 11:51:40.022391 IP: 192.168.5.1.55981 > 192.168.5.3.22, TCP: Flags [.], seq 2364440282:2364440282, ack 2406649464, win 1023, length 0
-    match block {
-        GeneralBlock::EnhancedPacketBlock(epb) => {
-            let ts_high = epb.ts_high;
-            let ts_low = epb.ts_low;
-            let data = epb.packet_data;
-            print_ethernet(&time_str, &data);
+#[derive(Debug, Clone, Copy)]
+pub struct PacketPrinter {
+    time_printer: PacketTimePrinter,
+    ethernet_printer: EthernetPrinter,
+    ip_printer: IpPrinter,
+    tcp_udp_printer: TcpUdpPrinter,
+}
+
+impl PacketPrinter {
+    fn new() -> Self {
+        Self {
+            time_printer: PacketTimePrinter::default(),
+            ethernet_printer: EthernetPrinter::default(),
+            ip_printer: IpPrinter::default(),
+            tcp_udp_printer: TcpUdpPrinter::default(),
         }
-        _ => (),
+    }
+
+    fn print(&mut self, block: GeneralBlock) {
+        // from my tcpdump (version: 4.99.5) output:
+        // 16:04:23.412830 IP 192.168.5.136.50720 > 36.110.219.249.https: Flags [.], ack 71540, win 64240, length 0
+        // 16:04:23.414623 IP 192.168.5.136.50618 > 36.110.219.249.https: Flags [.], ack 45260, win 64240, length 0
+        // 16:04:23.415451 IP 36.110.219.249.https > 192.168.5.136.50722: Flags [P.], seq 48180:49640, ack 1, win 64240, length 1460
+        // 16:04:23.416183 IP 120.255.43.60.https > 192.168.5.136.50845: Flags [P.], seq 74460:77380, ack 1, win 64240, length 2920
+        // 16:04:23.416370 IP 192.168.5.136.50845 > 120.255.43.60.https: Flags [.], ack 77380, win 64240, length 0
+        // 16:04:23.418079 IP 36.110.219.249.https > 192.168.5.136.50618: Flags [P.], seq 45260:49640, ack 1, win 64240, length 4380
+        // 16:04:23.418268 IP 192.168.5.136.50618 > 36.110.219.249.https: Flags [.], ack 49640, win 64240, length 0
+        // 16:04:23.419536 IP 112.46.2.127.https > 192.168.5.136.50799: Flags [P.], seq 159140:164980, ack 1, win 64240, length 5840
+        // 16:04:23.419537 IP 36.110.219.249.https > 192.168.5.136.50796: Flags [P.], seq 36500:45260, ack 1, win 64240, length 8760
+        // 16:04:23.419780 IP 192.168.5.136.50799 > 112.46.2.127.https: Flags [.], ack 164980, win 64240, length 0
+        // 16:04:23.419780 IP 192.168.5.136.50796 > 36.110.219.249.https: Flags [.], ack 45260, win 64240, length 0
+        // 16:04:23.420987 IP 36.110.219.249.https > 192.168.5.136.50796: Flags [P.], seq 45260:46720, ack 1, win 64240, length 1460
+        // program output:
+        // 11:51:39.979805 IP: 192.168.5.3.22 > 192.168.5.1.55981, TCP: Flags [P.], seq 2406649272:2406649364, ack 2364440282, win 9836, length 92
+        // 11:51:40.021937 IP: 192.168.5.3.22 > 192.168.5.1.55981, TCP: Flags [P.], seq 2406649364:2406649464, ack 2364440282, win 9836, length 100
+        // 11:51:40.022391 IP: 192.168.5.1.55981 > 192.168.5.3.22, TCP: Flags [.], seq 2364440282:2364440282, ack 2406649464, win 1023, length 0
+        match block {
+            GeneralBlock::EnhancedPacketBlock(epb) => {
+                let ts_high = epb.ts_high;
+                let ts_low = epb.ts_low;
+                let ethernet_data = epb.packet_data;
+
+                let mut msg_vec = Vec::new();
+
+                // 1. print time string
+                let time_str = self.time_printer.print(ts_high, ts_low);
+                msg_vec.push(time_str);
+
+                // 2. print ethernet info if needed
+                let (ethernet_str, next_level_protocol, ip_data) =
+                    self.ethernet_printer.print(&ethernet_data);
+                msg_vec.push(ethernet_str);
+
+                if ip_data.len() > 0 {
+                    // 3. print IP info
+                    let (ip_msg, next_level_protocol, transport_data) = match next_level_protocol {
+                        Some(nlp) => self.ip_printer.print(nlp, &ip_data),
+                        None => (String::new(), None, Vec::new()),
+                    };
+                    msg_vec.push(ip_msg);
+
+                    if transport_data.len() > 0 {
+                        // 4. print TCP/UDP info
+                        let tcp_udp_msg = match next_level_protocol {
+                            Some(nlp) => self.tcp_udp_printer.print(nlp, &transport_data),
+                            None => String::new(),
+                        };
+                        msg_vec.push(tcp_udp_msg);
+                    }
+                }
+
+                let new_msg_vec: Vec<&str> = msg_vec
+                    .iter()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.as_str())
+                    .collect();
+                let final_msg = new_msg_vec.join(" ");
+                println!("{}", final_msg);
+            }
+            _ => (),
+        }
     }
 }

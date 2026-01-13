@@ -85,7 +85,6 @@ pub fn capture_local(args: Args) -> Result<()> {
 
     loop {
         let blocks = cap.fetch_as_pcapng()?;
-        println!("XXX: {}", blocks.len());
         update_captured_packets_num(blocks.len());
         for block in blocks {
             split_rule.append(block)?;
