@@ -26,6 +26,7 @@ use pnet::packet::ethernet::EtherTypes;
 use pnet::packet::ethernet::EthernetPacket;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use pnet::packet::icmp::IcmpPacket;
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use pnet::packet::icmp::IcmpTypes;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use pnet::packet::ip::IpNextHeaderProtocol;
@@ -35,14 +36,15 @@ use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::Ipv4Packet;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use pnet::packet::ipv6::Ipv6Packet;
-use pnet::packet::tcp::Tcp;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use pnet::packet::tcp::TcpPacket;
 use pnet::packet::udp::UdpPacket;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use regex::Regex;
+use std::collections::HashMap;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use std::fs::File;
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use std::net::IpAddr;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use tracing::debug;
@@ -576,25 +578,97 @@ impl SplitRule {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct TcpUdpPrinter {
-    first_seq: u32,
-    first_ack: u32,
+    // src_addr -> src_port -> dst_addr -> dst_port -> first_seq
+    first_seq: HashMap<IpAddr, HashMap<u16, HashMap<IpAddr, HashMap<u16, u32>>>>,
+    // src_addr -> src_port -> dst_addr -> dst_port -> first_ack
+    first_ack: HashMap<IpAddr, HashMap<u16, HashMap<IpAddr, HashMap<u16, u32>>>>,
     show_raw_seq_ack: bool,
 }
 
 impl Default for TcpUdpPrinter {
     fn default() -> Self {
         Self {
-            first_seq: 0,
-            first_ack: 0,
+            first_seq: HashMap::new(),
+            first_ack: HashMap::new(),
             show_raw_seq_ack: false,
         }
     }
 }
 
 impl TcpUdpPrinter {
-    fn parse_tcp_flag(self, tcp_flags: u8) -> String {
+    fn get_first_seq(
+        &self,
+        src_addr: IpAddr,
+        src_port: u16,
+        dst_addr: IpAddr,
+        dst_port: u16,
+    ) -> Option<u32> {
+        if let Some(map1) = self.first_seq.get(&src_addr) {
+            if let Some(map2) = map1.get(&src_port) {
+                if let Some(map3) = map2.get(&dst_addr) {
+                    if let Some(first_seq) = map3.get(&dst_port) {
+                        return Some(*first_seq);
+                    }
+                }
+            }
+        }
+        None
+    }
+    fn get_first_ack(
+        &self,
+        src_addr: IpAddr,
+        src_port: u16,
+        dst_addr: IpAddr,
+        dst_port: u16,
+    ) -> Option<u32> {
+        if let Some(map1) = self.first_ack.get(&src_addr) {
+            if let Some(map2) = map1.get(&src_port) {
+                if let Some(map3) = map2.get(&dst_addr) {
+                    if let Some(first_ack) = map3.get(&dst_port) {
+                        return Some(*first_ack);
+                    }
+                }
+            }
+        }
+        None
+    }
+    fn insert_first_seq(
+        &mut self,
+        src_addr: IpAddr,
+        src_port: u16,
+        dst_addr: IpAddr,
+        dst_port: u16,
+        first_seq: u32,
+    ) {
+        self.first_seq
+            .entry(src_addr)
+            .or_insert_with(HashMap::new)
+            .entry(src_port)
+            .or_insert_with(HashMap::new)
+            .entry(dst_addr)
+            .or_insert_with(HashMap::new)
+            .insert(dst_port, first_seq);
+    }
+    fn insert_first_ack(
+        &mut self,
+        src_addr: IpAddr,
+        src_port: u16,
+        dst_addr: IpAddr,
+        dst_port: u16,
+        first_ack: u32,
+    ) {
+        self.first_ack
+            .entry(src_addr)
+            .or_insert_with(HashMap::new)
+            .entry(src_port)
+            .or_insert_with(HashMap::new)
+            .entry(dst_addr)
+            .or_insert_with(HashMap::new)
+            .insert(dst_port, first_ack);
+    }
+    fn parse_tcp_flag(&self, tcp_flags: u8) -> String {
         let mut flags = Vec::new();
         if tcp_flags & 0x01 != 0 {
             flags.push("F");
@@ -617,21 +691,68 @@ impl TcpUdpPrinter {
         }
         flags.join("")
     }
-    fn normalize_seq(&self, seq: u32) -> u32 {
+    fn normalize_seq(
+        &mut self,
+        src_addr: IpAddr,
+        src_port: u16,
+        dst_addr: IpAddr,
+        dst_port: u16,
+        seq: u32,
+    ) -> u32 {
         if self.show_raw_seq_ack {
             seq
         } else {
-            seq - self.first_seq
+            let first_seq = if let Some(first_seq) =
+                self.get_first_seq(src_addr, src_port, dst_addr, dst_port)
+            {
+                first_seq
+            } else {
+                let first_seq = seq;
+                self.insert_first_seq(src_addr, src_port, dst_addr, dst_port, first_seq);
+                first_seq
+            };
+
+            if seq > first_seq {
+                seq - first_seq
+            } else {
+                first_seq - seq
+            }
         }
     }
-    fn normalize_ack(&self, ack: u32) -> u32 {
+    fn normalize_ack(
+        &mut self,
+        src_addr: IpAddr,
+        src_port: u16,
+        dst_addr: IpAddr,
+        dst_port: u16,
+        ack: u32,
+    ) -> u32 {
         if self.show_raw_seq_ack {
             ack
         } else {
-            ack - self.first_ack
+            let first_ack = if let Some(first_ack) =
+                self.get_first_ack(src_addr, src_port, dst_addr, dst_port)
+            {
+                first_ack
+            } else {
+                let first_ack = ack;
+                self.insert_first_ack(src_addr, src_port, dst_addr, dst_port, first_ack);
+                first_ack
+            };
+            if ack > first_ack {
+                ack - first_ack
+            } else {
+                first_ack - ack
+            }
         }
     }
-    fn print(&mut self, next_level_protocol: IpNextHeaderProtocol, payload: &[u8]) -> String {
+    fn print(
+        &mut self,
+        src_addr: IpAddr,
+        dst_addr: IpAddr,
+        next_level_protocol: IpNextHeaderProtocol,
+        payload: &[u8],
+    ) -> String {
         match next_level_protocol {
             IpNextHeaderProtocols::Tcp => {
                 if let Some(tcp_packet) = TcpPacket::new(payload) {
@@ -642,16 +763,9 @@ impl TcpUdpPrinter {
                     let seq_raw = tcp_packet.get_sequence();
                     let ack_raw = tcp_packet.get_acknowledgement();
 
-                    if self.first_seq == 0 && self.first_ack == 0 {
-                        // set the first seq and ack
-                        // only set once
-                        self.first_seq = seq_raw;
-                        self.first_ack = ack_raw;
-                    }
-
-                    let seq = self.normalize_seq(seq_raw);
+                    let seq = self.normalize_seq(src_addr, src_port, dst_addr, dst_port, seq_raw);
                     let seq_end = seq + tcp_packet.payload().len() as u32;
-                    let ack = self.normalize_ack(ack_raw);
+                    let ack = self.normalize_ack(src_addr, src_port, dst_addr, dst_port, ack_raw);
 
                     let msg = format!(
                         "TCP: {} > {}, Flags [{}], seq {}:{}, ack {}, win {}, length {}",
@@ -690,6 +804,8 @@ impl TcpUdpPrinter {
                     let icmp_type = icmp_packet.get_icmp_type();
                     let icmp_code = icmp_packet.get_icmp_code();
                     let icmp_type_str = format!("{:?}", icmp_type);
+                    // for better readability, show type name instead of number
+                    let protocol_str = format!("{}({})", protocol_str, icmp_type_str);
 
                     let msg = format!(
                         "{}: type {}, code {}, length {}",
@@ -721,7 +837,13 @@ impl IpPrinter {
         self,
         next_level_protocol: EtherType,
         payload: &[u8],
-    ) -> (String, Option<IpNextHeaderProtocol>, Vec<u8>) {
+    ) -> Option<(
+        String,
+        IpAddr,
+        IpAddr,
+        Option<IpNextHeaderProtocol>,
+        Vec<u8>,
+    )> {
         match next_level_protocol {
             EtherTypes::Ipv4 => {
                 if let Some(ipv4_packet) = Ipv4Packet::new(payload) {
@@ -730,7 +852,13 @@ impl IpPrinter {
                     let next_level_protocol = ipv4_packet.get_next_level_protocol();
                     let msg = format!("IP: {} > {}", src_ip, dst_ip);
                     let payload = ipv4_packet.payload();
-                    return (msg, Some(next_level_protocol), payload.to_vec());
+                    return Some((
+                        msg,
+                        src_ip.into(),
+                        dst_ip.into(),
+                        Some(next_level_protocol),
+                        payload.to_vec(),
+                    ));
                 }
             }
             EtherTypes::Ipv6 => {
@@ -739,12 +867,18 @@ impl IpPrinter {
                     let dst_ip = ipv6_packet.get_destination();
                     let next_level_protocol = ipv6_packet.get_next_header();
                     let msg = format!("IP: {} > {}", src_ip, dst_ip);
-                    return (msg, Some(next_level_protocol), Vec::new());
+                    return Some((
+                        msg,
+                        src_ip.into(),
+                        dst_ip.into(),
+                        Some(next_level_protocol),
+                        payload.to_vec(),
+                    ));
                 }
             }
             _ => (),
         }
-        (String::new(), None, Vec::new())
+        None
     }
 }
 
@@ -917,7 +1051,7 @@ pub enum TimePrinterMode {
     DeltaFirst,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PacketPrinter {
     time_printer: PacketTimePrinter,
     ethernet_printer: EthernetPrinter,
@@ -972,16 +1106,20 @@ impl PacketPrinter {
 
                 if ip_data.len() > 0 {
                     // 3. print IP info
-                    let (ip_msg, next_level_protocol, transport_data) = match next_level_protocol {
-                        Some(nlp) => self.ip_printer.print(nlp, &ip_data),
-                        None => (String::new(), None, Vec::new()),
-                    };
+                    if let Some((ip_msg, src_addr, dst_addr, next_level_protocol, transport_data)) =
+                        match next_level_protocol {
+                            Some(nlp) => self.ip_printer.print(nlp, &ip_data),
+                            None => None,
+                        }
                     msg_vec.push(ip_msg);
 
                     if transport_data.len() > 0 {
                         // 4. print TCP/UDP info
                         let tcp_udp_msg = match next_level_protocol {
-                            Some(nlp) => self.tcp_udp_printer.print(nlp, &transport_data),
+                            Some(nlp) => {
+                                self.tcp_udp_printer
+                                    .print(src_addr, dst_addr, nlp, &transport_data)
+                            }
                             None => String::new(),
                         };
                         msg_vec.push(tcp_udp_msg);
