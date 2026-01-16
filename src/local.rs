@@ -54,7 +54,7 @@ pub fn capture_local(args: Args) -> Result<()> {
                 split_rule.append(block)?;
                 update_captured_packets_num(1);
             }
-            Err(e) => warn!("{}", e),
+            Err(e) => warn!("capture next as pcapng error: {}", e),
         }
     }
 }

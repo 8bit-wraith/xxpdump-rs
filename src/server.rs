@@ -117,6 +117,7 @@ fn packet_process(
     Ok(())
 }
 
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 async fn recv_packets(socket: &mut TcpStream, args: &Args, pbo: PcapByteOrder) -> Result<()> {
     let config = config::standard();
     let mut split_rule = SplitRule::init(args, pbo)?;

@@ -102,7 +102,7 @@ struct Args {
     immediate: bool,
 
     /// Set the read timeout for the capture, by default, this is 0 so it will block indefinitely
-    #[arg(short = 'T', long, default_value_t = 0.5)]
+    #[arg(short = 'T', long, default_value_t = 0.1)]
     timeout: f32,
 
     /// Set the filter when saving the packet, e.g. --filter ip=192.168.1.1 and port=80, please use --filter-examples to show more examples
@@ -323,6 +323,7 @@ fn quitting(mode: &str) {
     std::process::exit(0);
 }
 
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 fn print_filter_examples() {
     let examples = vec![
         "host 192.168.1.1 and !tcp",
@@ -366,17 +367,24 @@ async fn main() -> Result<()> {
     }
 
     info!("working...");
-    #[cfg(feature = "libpnet")]
-    if args.interface == "any" {
-        warn!(
-            "capture interface any not supported on feature 'libpnet', please use feature 'libpcap' or specify a concrete interface name"
-        );
-    }
+
     match args.mode.as_str() {
         "local" => {
+            #[cfg(feature = "libpnet")]
+            if args.interface == "any" {
+                warn!(
+                    "capture interface any not supported on feature 'libpnet', please use feature 'libpcap' or specify a concrete interface name"
+                );
+            }
             capture_local(args)?;
         }
         "client" => {
+            #[cfg(feature = "libpnet")]
+            if args.interface == "any" {
+                warn!(
+                    "capture interface any not supported on feature 'libpnet', please use feature 'libpcap' or specify a concrete interface name"
+                );
+            }
             capture_remote_client(args).await?;
         }
         "server" => {

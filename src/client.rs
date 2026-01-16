@@ -123,7 +123,7 @@ pub async fn capture_remote_client(args: Args) -> Result<()> {
         let server_addr = server_addr_split[0];
         let server_port = server_addr_split[1];
         // ignore communication with the server
-        let filter = format!("ip!={} and port!={}", server_addr, server_port);
+        let filter = format!("not host {} and not port {}", server_addr, server_port);
         filter
     } else {
         String::new()
@@ -189,7 +189,7 @@ pub async fn capture_remote_client(args: Args) -> Result<()> {
         let server_addr = server_addr_split[0];
         let server_port = server_addr_split[1];
         // ignore communication with the server
-        let filter = format!("ip!={} and port!={}", server_addr, server_port);
+        let filter = format!("not host {} and not port {}", server_addr, server_port);
         filter
     } else {
         String::new()

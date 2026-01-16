@@ -4,6 +4,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use chrono::DateTime;
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use chrono::Duration;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use chrono::Local;
@@ -19,6 +20,7 @@ use pcapture::fs::pcapng::InterfaceDescriptionBlock;
 use pcapture::fs::pcapng::SectionHeaderBlock;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use pnet::packet::Packet;
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use pnet::packet::ethernet::EtherType;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use pnet::packet::ethernet::EtherTypes;
@@ -29,6 +31,8 @@ use pnet::packet::icmp::IcmpPacket;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use pnet::packet::icmp::IcmpTypes;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
+use pnet::packet::icmpv6::Icmpv6Packet;
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use pnet::packet::ip::IpNextHeaderProtocol;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use pnet::packet::ip::IpNextHeaderProtocols;
@@ -38,9 +42,11 @@ use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::ipv6::Ipv6Packet;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use pnet::packet::tcp::TcpPacket;
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use pnet::packet::udp::UdpPacket;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use regex::Regex;
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use std::collections::HashMap;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use std::fs::File;
@@ -396,6 +402,7 @@ pub enum SplitRule {
     Print(PacketPrinter),
 }
 
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 impl Drop for SplitRule {
     fn drop(&mut self) {
         match self {
@@ -578,6 +585,7 @@ impl SplitRule {
     }
 }
 
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 #[derive(Debug, Clone)]
 pub struct TcpUdpPrinter {
     // src_addr -> src_port -> dst_addr -> dst_port -> first_seq
@@ -587,6 +595,7 @@ pub struct TcpUdpPrinter {
     show_raw_seq_ack: bool,
 }
 
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 impl Default for TcpUdpPrinter {
     fn default() -> Self {
         Self {
@@ -597,6 +606,7 @@ impl Default for TcpUdpPrinter {
     }
 }
 
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 impl TcpUdpPrinter {
     fn get_first_seq(
         &self,
@@ -768,7 +778,7 @@ impl TcpUdpPrinter {
                     let ack = self.normalize_ack(src_addr, src_port, dst_addr, dst_port, ack_raw);
 
                     let msg = format!(
-                        "TCP: {} > {}, Flags [{}], seq {}:{}, ack {}, win {}, length {}",
+                        "TCP {} > {} Flags [{}] seq {}:{} ack {} win {} len {}",
                         src_port,
                         dst_port,
                         tcp_flags_str,
@@ -779,6 +789,9 @@ impl TcpUdpPrinter {
                         tcp_packet.payload().len()
                     );
                     return msg;
+                } else {
+                    let msg = format!("TCP(failed) len {}", payload.len());
+                    return msg;
                 }
             }
             IpNextHeaderProtocols::Udp => {
@@ -786,79 +799,148 @@ impl TcpUdpPrinter {
                     let src_port = udp_packet.get_source();
                     let dst_port = udp_packet.get_destination();
                     let msg = format!(
-                        "{} > {}, UDP: length {}",
+                        "UDP {} > {} len {}",
                         src_port,
                         dst_port,
                         udp_packet.payload().len()
                     );
                     return msg;
+                } else {
+                    let msg = format!("UDP(failed) len {}", payload.len());
+                    return msg;
                 }
             }
-            IpNextHeaderProtocols::Icmp | IpNextHeaderProtocols::Icmpv6 => {
-                let protocol_str = match next_level_protocol {
-                    IpNextHeaderProtocols::Icmp => "ICMP",
-                    IpNextHeaderProtocols::Icmpv6 => "ICMPv6",
-                    _ => "ICMP",
-                };
+            IpNextHeaderProtocols::Icmp => {
+                let protocol_str = "ICMP";
                 if let Some(icmp_packet) = IcmpPacket::new(payload) {
                     let icmp_type = icmp_packet.get_icmp_type();
                     let icmp_code = icmp_packet.get_icmp_code();
-                    let icmp_type_str = format!("{:?}", icmp_type);
-                    // for better readability, show type name instead of number
-                    let protocol_str = format!("{}({})", protocol_str, icmp_type_str);
+
+                    let icmp_type_str = match icmp_type {
+                        IcmpTypes::AddressMaskReply => String::from("AddressMaskReply"),
+                        IcmpTypes::AddressMaskRequest => String::from("AddressMaskRequest"),
+                        IcmpTypes::DestinationUnreachable => String::from("DestinationUnreachable"),
+                        IcmpTypes::EchoReply => String::from("EchoReply"),
+                        IcmpTypes::EchoRequest => String::from("EchoRequest"),
+                        IcmpTypes::InformationReply => String::from("InformationReply"),
+                        IcmpTypes::InformationRequest => String::from("InformationRequest"),
+                        IcmpTypes::ParameterProblem => String::from("ParameterProblem"),
+                        IcmpTypes::RedirectMessage => String::from("RedirectMessage"),
+                        IcmpTypes::RouterAdvertisement => String::from("RouterAdvertisement"),
+                        IcmpTypes::RouterSolicitation => String::from("RouterSolicitation"),
+                        IcmpTypes::SourceQuench => String::from("SourceQuench"),
+                        IcmpTypes::TimeExceeded => String::from("TimeExceeded"),
+                        IcmpTypes::TimestampReply => String::from("TimestampReply"),
+                        IcmpTypes::Timestamp => String::from("Timestamp"),
+                        IcmpTypes::Traceroute => String::from("Traceroute"),
+                        _ => format!("{}", icmp_type.0),
+                    };
 
                     let msg = format!(
-                        "{}: type {}, code {}, length {}",
+                        "{} Type {}({}) code({}) len {}",
                         protocol_str,
+                        icmp_type_str,
                         icmp_type.0,
                         icmp_code.0,
                         icmp_packet.payload().len()
                     );
                     return msg;
+                } else {
+                    let msg = format!("{}(failed) len {}", protocol_str, payload.len());
+                    return msg;
                 }
             }
-            _ => (),
+            IpNextHeaderProtocols::Icmpv6 => {
+                let protocol_str = "ICMPv6";
+                if let Some(icmpv6_packet) = Icmpv6Packet::new(payload) {
+                    use pnet::packet::icmpv6::Icmpv6Types;
+
+                    let icmpv6_type = icmpv6_packet.get_icmpv6_type();
+                    let icmpv6_code = icmpv6_packet.get_icmpv6_code();
+
+                    let icmp_type_str = match icmpv6_type {
+                        Icmpv6Types::DestinationUnreachable => {
+                            String::from("DestinationUnreachable")
+                        }
+                        Icmpv6Types::EchoReply => String::from("EchoReply"),
+                        Icmpv6Types::EchoRequest => String::from("EchoRequest"),
+                        Icmpv6Types::NeighborAdvert => String::from("NeighborAdvert"),
+                        Icmpv6Types::NeighborSolicit => String::from("NeighborSolicit"),
+                        Icmpv6Types::PacketTooBig => String::from("PacketTooBig"),
+                        Icmpv6Types::ParameterProblem => String::from("ParameterProblem"),
+                        Icmpv6Types::Redirect => String::from("Redirect"),
+                        Icmpv6Types::RouterAdvert => String::from("RouterAdvert"),
+                        Icmpv6Types::RouterSolicit => String::from("RouterSolicit"),
+                        Icmpv6Types::TimeExceeded => String::from("TimeExceeded"),
+                        _ => format!("{}", icmpv6_type.0),
+                    };
+
+                    let msg = format!(
+                        "{} Type {}({}) code({}) len {}",
+                        protocol_str,
+                        icmp_type_str,
+                        icmpv6_type.0,
+                        icmpv6_code.0,
+                        icmpv6_packet.payload().len()
+                    );
+                    return msg;
+                } else {
+                    let msg = format!("{}(failed) len {}", protocol_str, payload.len());
+                    return msg;
+                }
+            }
+            _ => {
+                let msg = format!(
+                    "{} len {}",
+                    next_level_protocol.to_string().to_uppercase(),
+                    payload.len()
+                );
+                return msg;
+            }
         }
-        String::new()
     }
 }
 
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 #[derive(Debug, Clone, Copy)]
 pub struct IpPrinter {}
 
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 impl Default for IpPrinter {
     fn default() -> Self {
         Self {}
     }
 }
 
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 impl IpPrinter {
     fn print(
         self,
         next_level_protocol: EtherType,
         payload: &[u8],
-    ) -> Option<(
+    ) -> (
         String,
-        IpAddr,
-        IpAddr,
-        Option<IpNextHeaderProtocol>,
-        Vec<u8>,
-    )> {
+        Option<(IpAddr, IpAddr, Option<IpNextHeaderProtocol>, Vec<u8>)>,
+    ) {
         match next_level_protocol {
             EtherTypes::Ipv4 => {
                 if let Some(ipv4_packet) = Ipv4Packet::new(payload) {
                     let src_ip = ipv4_packet.get_source();
                     let dst_ip = ipv4_packet.get_destination();
                     let next_level_protocol = ipv4_packet.get_next_level_protocol();
-                    let msg = format!("IP: {} > {}", src_ip, dst_ip);
+                    let msg = format!("IP {} > {}", src_ip, dst_ip);
                     let payload = ipv4_packet.payload();
-                    return Some((
+                    (
                         msg,
-                        src_ip.into(),
-                        dst_ip.into(),
-                        Some(next_level_protocol),
-                        payload.to_vec(),
-                    ));
+                        Some((
+                            src_ip.into(),
+                            dst_ip.into(),
+                            Some(next_level_protocol),
+                            payload.to_vec(),
+                        )),
+                    )
+                } else {
+                    (String::from("BUILD IPV4 ERROR"), None)
                 }
             }
             EtherTypes::Ipv6 => {
@@ -867,26 +949,34 @@ impl IpPrinter {
                     let dst_ip = ipv6_packet.get_destination();
                     let next_level_protocol = ipv6_packet.get_next_header();
                     let msg = format!("IP: {} > {}", src_ip, dst_ip);
-                    return Some((
+                    (
                         msg,
-                        src_ip.into(),
-                        dst_ip.into(),
-                        Some(next_level_protocol),
-                        payload.to_vec(),
-                    ));
+                        Some((
+                            src_ip.into(),
+                            dst_ip.into(),
+                            Some(next_level_protocol),
+                            payload.to_vec(),
+                        )),
+                    )
+                } else {
+                    (String::from("BUILD IPV6 ERROR"), None)
                 }
             }
-            _ => (),
+            _ => (
+                format!("{}", next_level_protocol.to_string().to_uppercase()),
+                None,
+            ),
         }
-        None
     }
 }
 
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 #[derive(Debug, Clone, Copy)]
 struct EthernetPrinter {
     pub show_ethernet: bool,
 }
 
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 impl Default for EthernetPrinter {
     fn default() -> Self {
         Self {
@@ -895,6 +985,7 @@ impl Default for EthernetPrinter {
     }
 }
 
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 impl EthernetPrinter {
     fn print(&self, payload: &[u8]) -> (String, Option<EtherType>, Vec<u8>) {
         if let Some(ethernet_packet) = EthernetPacket::new(payload) {
@@ -904,19 +995,27 @@ impl EthernetPrinter {
             let payload = ethernet_packet.payload();
             let msg = if self.show_ethernet {
                 format!(
-                    "ETH: {} > {}, type {}",
-                    src_mac, dst_mac, next_level_protocol,
+                    "ETH {} > {} ethertype {} (0x{:04x})",
+                    src_mac,
+                    dst_mac,
+                    next_level_protocol.to_string().to_lowercase(),
+                    next_level_protocol.0,
                 )
             } else {
-                String::new()
+                if payload.len() == 0 {
+                    String::from("NO IP")
+                } else {
+                    String::new()
+                }
             };
             (msg, Some(next_level_protocol), payload.to_vec())
         } else {
-            (String::new(), None, Vec::new())
+            (String::from("NO ETH"), None, Vec::new())
         }
     }
 }
 
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 #[derive(Debug, Clone, Copy)]
 struct PacketTimePrinter {
     pub time_printer_mode: TimePrinterMode,
@@ -927,6 +1026,7 @@ struct PacketTimePrinter {
     pub first_packet_time: Option<Duration>, // for -ttttt
 }
 
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 impl Default for PacketTimePrinter {
     fn default() -> Self {
         Self {
@@ -940,6 +1040,7 @@ impl Default for PacketTimePrinter {
     }
 }
 
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 impl PacketTimePrinter {
     fn set_time_printer_mode(&mut self, mode: TimePrinterMode) {
         self.time_printer_mode = mode;
@@ -1042,6 +1143,7 @@ impl PacketTimePrinter {
     }
 }
 
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 #[derive(Debug, Clone, Copy)]
 pub enum TimePrinterMode {
     NoPrint,
@@ -1051,6 +1153,7 @@ pub enum TimePrinterMode {
     DeltaFirst,
 }
 
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 #[derive(Debug, Clone)]
 pub struct PacketPrinter {
     time_printer: PacketTimePrinter,
@@ -1059,6 +1162,7 @@ pub struct PacketPrinter {
     tcp_udp_printer: TcpUdpPrinter,
 }
 
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 impl PacketPrinter {
     fn new() -> Self {
         Self {
@@ -1071,22 +1175,10 @@ impl PacketPrinter {
 
     fn print(&mut self, block: GeneralBlock) {
         // from my tcpdump (version: 4.99.5) output:
-        // 16:04:23.412830 IP 192.168.5.136.50720 > 36.110.219.249.https: Flags [.], ack 71540, win 64240, length 0
-        // 16:04:23.414623 IP 192.168.5.136.50618 > 36.110.219.249.https: Flags [.], ack 45260, win 64240, length 0
-        // 16:04:23.415451 IP 36.110.219.249.https > 192.168.5.136.50722: Flags [P.], seq 48180:49640, ack 1, win 64240, length 1460
-        // 16:04:23.416183 IP 120.255.43.60.https > 192.168.5.136.50845: Flags [P.], seq 74460:77380, ack 1, win 64240, length 2920
-        // 16:04:23.416370 IP 192.168.5.136.50845 > 120.255.43.60.https: Flags [.], ack 77380, win 64240, length 0
-        // 16:04:23.418079 IP 36.110.219.249.https > 192.168.5.136.50618: Flags [P.], seq 45260:49640, ack 1, win 64240, length 4380
-        // 16:04:23.418268 IP 192.168.5.136.50618 > 36.110.219.249.https: Flags [.], ack 49640, win 64240, length 0
-        // 16:04:23.419536 IP 112.46.2.127.https > 192.168.5.136.50799: Flags [P.], seq 159140:164980, ack 1, win 64240, length 5840
-        // 16:04:23.419537 IP 36.110.219.249.https > 192.168.5.136.50796: Flags [P.], seq 36500:45260, ack 1, win 64240, length 8760
-        // 16:04:23.419780 IP 192.168.5.136.50799 > 112.46.2.127.https: Flags [.], ack 164980, win 64240, length 0
-        // 16:04:23.419780 IP 192.168.5.136.50796 > 36.110.219.249.https: Flags [.], ack 45260, win 64240, length 0
-        // 16:04:23.420987 IP 36.110.219.249.https > 192.168.5.136.50796: Flags [P.], seq 45260:46720, ack 1, win 64240, length 1460
         // program output:
-        // 11:51:39.979805 IP: 192.168.5.3.22 > 192.168.5.1.55981, TCP: Flags [P.], seq 2406649272:2406649364, ack 2364440282, win 9836, length 92
-        // 11:51:40.021937 IP: 192.168.5.3.22 > 192.168.5.1.55981, TCP: Flags [P.], seq 2406649364:2406649464, ack 2364440282, win 9836, length 100
-        // 11:51:40.022391 IP: 192.168.5.1.55981 > 192.168.5.3.22, TCP: Flags [.], seq 2364440282:2364440282, ack 2406649464, win 1023, length 0
+        // 11:51:39.979805 IP: 192.168.5.3.22 > 192.168.5.1.55981, TCP: Flags [P.], seq 2406649272:2406649364, ack 2364440282, win 9836, len 92
+        // 11:51:40.021937 IP: 192.168.5.3.22 > 192.168.5.1.55981, TCP: Flags [P.], seq 2406649364:2406649464, ack 2364440282, win 9836, len 100
+        // 11:51:40.022391 IP: 192.168.5.1.55981 > 192.168.5.3.22, TCP: Flags [.], seq 2364440282:2364440282, ack 2406649464, win 1023, len 0
         match block {
             GeneralBlock::EnhancedPacketBlock(epb) => {
                 let ts_high = epb.ts_high;
@@ -1100,29 +1192,29 @@ impl PacketPrinter {
                 msg_vec.push(time_str);
 
                 // 2. print ethernet info if needed
-                let (ethernet_str, next_level_protocol, ip_data) =
+                let (ethernet_str, next_level_protocol, eth_payload) =
                     self.ethernet_printer.print(&ethernet_data);
                 msg_vec.push(ethernet_str);
 
-                if ip_data.len() > 0 {
+                if eth_payload.len() > 0 {
                     // 3. print IP info
-                    if let Some((ip_msg, src_addr, dst_addr, next_level_protocol, transport_data)) =
-                        match next_level_protocol {
-                            Some(nlp) => self.ip_printer.print(nlp, &ip_data),
-                            None => None,
-                        }
+                    let (ip_msg, ret) = match next_level_protocol {
+                        Some(nlp) => self.ip_printer.print(nlp, &eth_payload),
+                        None => (String::new(), None),
+                    };
                     msg_vec.push(ip_msg);
-
-                    if transport_data.len() > 0 {
-                        // 4. print TCP/UDP info
-                        let tcp_udp_msg = match next_level_protocol {
-                            Some(nlp) => {
-                                self.tcp_udp_printer
-                                    .print(src_addr, dst_addr, nlp, &transport_data)
-                            }
-                            None => String::new(),
-                        };
-                        msg_vec.push(tcp_udp_msg);
+                    if let Some((src_addr, dst_addr, nlp, ip_payload)) = ret {
+                        if ip_payload.len() > 0 {
+                            // 4. print TCP/UDP info
+                            let tcp_udp_msg = match nlp {
+                                Some(nlp) => {
+                                    self.tcp_udp_printer
+                                        .print(src_addr, dst_addr, nlp, &ip_payload)
+                                }
+                                None => String::new(),
+                            };
+                            msg_vec.push(tcp_udp_msg);
+                        }
                     }
                 }
 
@@ -1131,7 +1223,7 @@ impl PacketPrinter {
                     .filter(|s| !s.is_empty())
                     .map(|s| s.as_str())
                     .collect();
-                let final_msg = new_msg_vec.join(" ");
+                let final_msg = new_msg_vec.join("|");
                 println!("{}", final_msg);
             }
             _ => (),
