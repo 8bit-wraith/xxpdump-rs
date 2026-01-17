@@ -21,6 +21,10 @@ use pcapture::fs::pcapng::SectionHeaderBlock;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use pnet::packet::Packet;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
+use pnet::packet::arp::ArpOperations;
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
+use pnet::packet::arp::ArpPacket;
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use pnet::packet::ethernet::EtherType;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use pnet::packet::ethernet::EtherTypes;
@@ -778,7 +782,7 @@ impl TcpUdpPrinter {
                     let ack = self.normalize_ack(src_addr, src_port, dst_addr, dst_port, ack_raw);
 
                     let msg = format!(
-                        "TCP {} > {} Flags [{}] seq {}:{} ack {} win {} len {}",
+                        "TCP {} > {} flags [{}] seq {}:{} ack {} win {} len {}",
                         src_port,
                         dst_port,
                         tcp_flags_str,
@@ -811,7 +815,6 @@ impl TcpUdpPrinter {
                 }
             }
             IpNextHeaderProtocols::Icmp => {
-                let protocol_str = "ICMP";
                 if let Some(icmp_packet) = IcmpPacket::new(payload) {
                     let icmp_type = icmp_packet.get_icmp_type();
                     let icmp_code = icmp_packet.get_icmp_code();
@@ -836,22 +839,18 @@ impl TcpUdpPrinter {
                         _ => format!("{}", icmp_type.0),
                     };
 
-                    let msg = format!(
-                        "{} Type {}({}) code({}) len {}",
-                        protocol_str,
+                    format!(
+                        "ICMP type {}({}) code({}) len {}",
                         icmp_type_str,
                         icmp_type.0,
                         icmp_code.0,
                         icmp_packet.payload().len()
-                    );
-                    return msg;
+                    )
                 } else {
-                    let msg = format!("{}(failed) len {}", protocol_str, payload.len());
-                    return msg;
+                    String::from("BUILD TCP FAILED")
                 }
             }
             IpNextHeaderProtocols::Icmpv6 => {
-                let protocol_str = "ICMPv6";
                 if let Some(icmpv6_packet) = Icmpv6Packet::new(payload) {
                     use pnet::packet::icmpv6::Icmpv6Types;
 
@@ -875,18 +874,15 @@ impl TcpUdpPrinter {
                         _ => format!("{}", icmpv6_type.0),
                     };
 
-                    let msg = format!(
-                        "{} Type {}({}) code({}) len {}",
-                        protocol_str,
+                    format!(
+                        "ICMPv6 type {}({}) code({}) len {}",
                         icmp_type_str,
                         icmpv6_type.0,
                         icmpv6_code.0,
                         icmpv6_packet.payload().len()
-                    );
-                    return msg;
+                    )
                 } else {
-                    let msg = format!("{}(failed) len {}", protocol_str, payload.len());
-                    return msg;
+                    String::from("BUILD ICMPV6 ERROR")
                 }
             }
             _ => {
@@ -948,7 +944,7 @@ impl IpPrinter {
                     let src_ip = ipv6_packet.get_source();
                     let dst_ip = ipv6_packet.get_destination();
                     let next_level_protocol = ipv6_packet.get_next_header();
-                    let msg = format!("IP: {} > {}", src_ip, dst_ip);
+                    let msg = format!("IPv6 {} > {}", src_ip, dst_ip);
                     (
                         msg,
                         Some((
@@ -962,8 +958,28 @@ impl IpPrinter {
                     (String::from("BUILD IPV6 ERROR"), None)
                 }
             }
+            EtherTypes::Arp => {
+                if let Some(arp_packet) = ArpPacket::new(payload) {
+                    let sender = arp_packet.get_sender_proto_addr();
+                    let target = arp_packet.get_target_proto_addr();
+                    let operation = arp_packet.get_operation();
+                    let op_str = match operation {
+                        ArpOperations::Reply => String::from("Reply"),
+                        ArpOperations::Request => String::from("Request"),
+                        _ => format!("{}", operation.0),
+                    };
+                    let msg = format!("ARP {} > {} op {}", sender, target, op_str);
+                    (msg, None)
+                } else {
+                    (String::from("BUILD ARP ERROR"), None)
+                }
+            }
             _ => (
-                format!("{}", next_level_protocol.to_string().to_uppercase()),
+                format!(
+                    "{} len {}",
+                    next_level_protocol.to_string().to_uppercase(),
+                    payload.len()
+                ),
                 None,
             ),
         }
