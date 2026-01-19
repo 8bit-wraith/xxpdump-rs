@@ -1,13 +1,13 @@
 [package]
-name = "xxpdump"
+name = "widump"
 version = "0.4.1"
-authors = ["RikoNaka <xxy1836@gmail.com>"]
-description = "The next generation of traffic capture software"
-repository = "https://github.com/rikonaka/xxpdump-rs"
+authors = ["Aye <aye@maat.is> Hue <hue@maat.is>"]
+description = "A tool that only captures what our AI is looking for"
+repository = "https://github.com/8b-is/widump"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 edition = "2024"
-keywords = ["tcpdump", "traffic", "wireshark"]
+keywords = ["mcp", "traffic", "wireshark"]
 
 [dependencies]
 ctrlc = "^3"
