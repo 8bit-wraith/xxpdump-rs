@@ -97,6 +97,38 @@ pub struct WatchRule {
     pub created: u64,
 }
 
+/// Threat rule types for guardian mode
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ThreatRule {
+    /// Block specific MAC address
+    BlockMac { mac: String, reason: String },
+    /// Block specific IP address
+    BlockIp { ip: IpAddr, reason: String },
+    /// Block IP range (CIDR notation stored as string)
+    BlockIpRange { cidr: String, reason: String },
+    /// Detect ARP spoofing (MAC/IP mismatch)
+    ArpSpoofDetect,
+    /// Detect port scanning
+    PortScanDetect { threshold: u32, window_secs: u32 },
+    /// Rate limit packets per second
+    RateLimit { mac: Option<String>, pps_limit: u32 },
+    /// Alert on new device
+    NewDeviceAlert,
+    /// Alert on persistent device (seen too long)
+    PersistentDevice { mac: String, alert_after_mins: u32 },
+}
+
+/// Stored threat rule with metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreatEntry {
+    pub id: u64,
+    pub rule: ThreatRule,
+    pub enabled: bool,
+    pub hits: u64,
+    pub last_hit: Option<u64>,
+    pub created: u64,
+}
+
 /// Defense action
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DefenseMode {
@@ -152,6 +184,10 @@ pub struct NetworkState {
     pub defense_mode: DefenseMode,
     pub block_list: Vec<BlockEntry>,
 
+    // Threat rules (guardian mode)
+    pub threats: Vec<ThreatEntry>,
+    pub threat_counter: u64,
+
     // Timing
     pub started: Instant,
     pub last_1m_reset: Instant,
@@ -174,6 +210,8 @@ impl NetworkState {
             watch_counter: 0,
             defense_mode: DefenseMode::Log,
             block_list: Vec::new(),
+            threats: Vec::new(),
+            threat_counter: 0,
             started: now,
             last_1m_reset: now,
             last_5m_reset: now,
@@ -258,6 +296,35 @@ impl NetworkState {
             }
         }
         false
+    }
+
+    /// Add a threat rule
+    pub fn add_threat(&mut self, rule: ThreatRule) -> u64 {
+        self.threat_counter += 1;
+        self.threats.push(ThreatEntry {
+            id: self.threat_counter,
+            rule,
+            enabled: true,
+            hits: 0,
+            last_hit: None,
+            created: epoch_ms(),
+        });
+        self.threat_counter
+    }
+
+    /// Remove a threat rule by ID
+    pub fn remove_threat(&mut self, id: u64) -> bool {
+        let len_before = self.threats.len();
+        self.threats.retain(|t| t.id != id);
+        self.threats.len() != len_before
+    }
+
+    /// Record a threat hit
+    pub fn record_threat_hit(&mut self, id: u64) {
+        if let Some(entry) = self.threats.iter_mut().find(|t| t.id == id) {
+            entry.hits += 1;
+            entry.last_hit = Some(epoch_ms());
+        }
     }
 }
 
