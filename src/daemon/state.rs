@@ -131,6 +131,18 @@ pub struct ThreatEntry {
     pub created: u64,
 }
 
+/// Recorded defense action
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DefenseActionRecord {
+    pub id: u64,
+    pub threat_id: Option<u64>,
+    pub action_type: String,  // "arp_correct", "tcp_rst", "block_added"
+    pub target_mac: Option<String>,
+    pub target_ip: Option<IpAddr>,
+    pub success: bool,
+    pub timestamp: u64,
+}
+
 /// Defense action
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DefenseMode {
@@ -190,6 +202,10 @@ pub struct NetworkState {
     pub threats: Vec<ThreatEntry>,
     pub threat_counter: u64,
 
+    // Defense actions history
+    pub defense_actions: VecDeque<DefenseActionRecord>,
+    pub defense_action_counter: u64,
+
     // Timing
     pub started: Instant,
     pub last_1m_reset: Instant,
@@ -214,6 +230,8 @@ impl NetworkState {
             block_list: Vec::new(),
             threats: Vec::new(),
             threat_counter: 0,
+            defense_actions: VecDeque::with_capacity(100),
+            defense_action_counter: 0,
             started: now,
             last_1m_reset: now,
             last_5m_reset: now,
@@ -327,6 +345,32 @@ impl NetworkState {
             entry.hits += 1;
             entry.last_hit = Some(epoch_ms());
         }
+    }
+
+    /// Record a defense action
+    pub fn record_defense_action(
+        &mut self,
+        threat_id: Option<u64>,
+        action_type: &str,
+        target_mac: Option<String>,
+        target_ip: Option<IpAddr>,
+        success: bool,
+    ) -> u64 {
+        self.defense_action_counter += 1;
+        let action = DefenseActionRecord {
+            id: self.defense_action_counter,
+            threat_id,
+            action_type: action_type.into(),
+            target_mac,
+            target_ip,
+            success,
+            timestamp: epoch_ms(),
+        };
+        if self.defense_actions.len() >= 100 {
+            self.defense_actions.pop_front();
+        }
+        self.defense_actions.push_back(action);
+        self.defense_action_counter
     }
 }
 

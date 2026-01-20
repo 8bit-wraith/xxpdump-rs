@@ -131,6 +131,7 @@ async fn handle_request(req: RpcRequest, state: &SharedState) -> RpcResponse {
         "threat.remove" => handle_threat_remove(&req.params, state).await,
         "threat.list" => handle_threat_list(state).await,
         "threat.enable" => handle_threat_enable(&req.params, state).await,
+        "threat.actions" => handle_threat_actions(&req.params, state).await,
         _ => Err(RpcError {
             code: -32601,
             message: format!("Method not found: {}", req.method),
@@ -640,4 +641,23 @@ async fn handle_threat_enable(
             message: format!("Threat {} not found", id),
         })
     }
+}
+
+async fn handle_threat_actions(
+    params: &Option<serde_json::Value>,
+    state: &SharedState,
+) -> Result<serde_json::Value, RpcError> {
+    let limit = params
+        .as_ref()
+        .and_then(|p| p.get("limit"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50) as usize;
+
+    let state = state.read().await;
+    let actions: Vec<_> = state.defense_actions.iter().rev().take(limit).cloned().collect();
+
+    serde_json::to_value(actions).map_err(|e| RpcError {
+        code: -32000,
+        message: format!("Serialization error: {}", e),
+    })
 }
