@@ -84,6 +84,7 @@ pub enum AlertCategory {
     UnusualProtocol,
     HighTraffic,
     WatchMatch,
+    ThreatMatch,
 }
 
 /// Watch rule (LLM-defined)

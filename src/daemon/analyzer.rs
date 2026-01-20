@@ -112,6 +112,27 @@ pub fn analyze_packet(
     let src_mac = eth.get_source();
     let dst_mac = eth.get_destination();
 
+    // Check against threat rules
+    let src_mac_str = src_mac.to_string();
+    let triggered_threats = check_threats(&src_mac_str, None, None, state);
+    for (threat_id, reason) in triggered_threats {
+        let alert = Alert {
+            id: 0, // Will be assigned by caller or state
+            level: InterestLevel::Critical,
+            category: AlertCategory::ThreatMatch,
+            summary: reason,
+            details: serde_json::json!({
+                "threat_id": threat_id,
+                "src_mac": src_mac_str,
+            }),
+            timestamp: now,
+            source_mac: Some(src_mac_str.clone()),
+            source_ip: None,
+        };
+        alerts.push(alert);
+        state.record_threat_hit(threat_id);
+    }
+
     // Update device seen (source)
     update_device(state, src_mac, now);
 
@@ -398,5 +419,71 @@ fn update_flow(state: &mut NetworkState, key: FlowKey, bytes: u64, now: u64) {
 /// Check if port is typically a server port
 fn is_server_port(port: u16) -> bool {
     matches!(port, 22 | 80 | 443 | 8080 | 3306 | 5432 | 6379 | 27017)
+}
+
+/// Check packet against threat rules, return any triggered threats
+pub fn check_threats(
+    src_mac: &str,
+    src_ip: Option<IpAddr>,
+    dst_ip: Option<IpAddr>,
+    state: &NetworkState,
+) -> Vec<(u64, String)> {
+    use super::state::ThreatRule;
+
+    let mut triggered = Vec::new();
+
+    for entry in &state.threats {
+        if !entry.enabled {
+            continue;
+        }
+
+        let matched = match &entry.rule {
+            ThreatRule::BlockMac { mac, reason } => {
+                if mac.eq_ignore_ascii_case(src_mac) {
+                    Some(format!("Blocked MAC {} seen: {}", mac, reason))
+                } else {
+                    None
+                }
+            }
+            ThreatRule::BlockIp { ip, reason } => {
+                if src_ip == Some(*ip) || dst_ip == Some(*ip) {
+                    Some(format!("Blocked IP {} seen: {}", ip, reason))
+                } else {
+                    None
+                }
+            }
+            ThreatRule::BlockIpRange { cidr, reason } => {
+                // Simple prefix check for now (proper CIDR parsing can be added later)
+                let prefix = cidr.split('/').next().unwrap_or("");
+                let matches = src_ip
+                    .map(|ip| ip.to_string().starts_with(prefix))
+                    .unwrap_or(false)
+                    || dst_ip
+                        .map(|ip| ip.to_string().starts_with(prefix))
+                        .unwrap_or(false);
+                if matches {
+                    Some(format!("Blocked IP range {} seen: {}", cidr, reason))
+                } else {
+                    None
+                }
+            }
+            // ArpSpoofDetect is handled separately in analyze_arp
+            ThreatRule::ArpSpoofDetect => None,
+            // PortScanDetect is handled separately in ScanDetector
+            ThreatRule::PortScanDetect { .. } => None,
+            // RateLimit requires packet counting (future enhancement)
+            ThreatRule::RateLimit { .. } => None,
+            // NewDeviceAlert is handled in device tracking
+            ThreatRule::NewDeviceAlert => None,
+            // PersistentDevice requires time tracking (future enhancement)
+            ThreatRule::PersistentDevice { .. } => None,
+        };
+
+        if let Some(reason) = matched {
+            triggered.push((entry.id, reason));
+        }
+    }
+
+    triggered
 }
 
