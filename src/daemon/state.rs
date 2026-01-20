@@ -85,6 +85,7 @@ pub enum AlertCategory {
     HighTraffic,
     WatchMatch,
     ThreatMatch,
+    DefenseAction,
 }
 
 /// Watch rule (LLM-defined)

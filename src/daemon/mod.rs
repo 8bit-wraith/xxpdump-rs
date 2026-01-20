@@ -14,7 +14,7 @@ use analyzer::{analyze_packet, ArpCache, ScanDetector};
 use avahi::AvahiAdvertiser;
 use defense::DefenseInjector;
 use rpc::{start_rpc_server, SharedState};
-use state::{DefenseMode, NetworkState};
+use state::{AlertCategory, DefenseMode, InterestLevel, NetworkState};
 
 use pcapture::Capture;
 use pcapture::fs::pcapng::GeneralBlock;
@@ -96,9 +96,10 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
     // Capture loop
     let capture_state = state.clone();
     let capture_config = config.clone();
+    let capture_injector = _injector.clone();
 
     tokio::task::spawn_blocking(move || {
-        run_capture_loop(capture_config, capture_state);
+        run_capture_loop(capture_config, capture_state, capture_injector);
     })
     .await?;
 
@@ -110,7 +111,7 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
 
 /// Blocking capture loop (runs in spawn_blocking)
 #[cfg(feature = "libpnet")]
-fn run_capture_loop(config: DaemonConfig, state: SharedState) {
+fn run_capture_loop(config: DaemonConfig, state: SharedState, _injector: Option<Arc<tokio::sync::Mutex<DefenseInjector>>>) {
     use pcapture::PcapByteOrder;
 
     // Create capture
@@ -160,18 +161,41 @@ fn run_capture_loop(config: DaemonConfig, state: SharedState) {
                         })
                     };
 
-                    // Push alerts to state
+                    // Push alerts to state and check for defense execution
                     if !alerts.is_empty() {
                         let rt = tokio::runtime::Handle::current();
                         rt.block_on(async {
-                            let mut state = state.write().await;
-                            for alert in alerts {
-                                state.push_alert(
-                                    alert.level,
-                                    alert.category,
-                                    alert.summary,
-                                    alert.details,
-                                );
+                            // First push all alerts
+                            {
+                                let mut state = state.write().await;
+                                for alert in &alerts {
+                                    state.push_alert(
+                                        alert.level.clone(),
+                                        alert.category.clone(),
+                                        alert.summary.clone(),
+                                        alert.details.clone(),
+                                    );
+                                }
+                            }
+
+                            // Check if we should execute defense
+                            let state_read = state.read().await;
+                            let should_block = state_read.defense_mode == DefenseMode::AutoBlock;
+                            let has_threat = alerts.iter().any(|a|
+                                matches!(a.category, AlertCategory::ThreatMatch | AlertCategory::ArpSpoof)
+                            );
+                            drop(state_read);
+
+                            if should_block && has_threat {
+                                if let Some(ref _inj) = _injector {
+                                    let mut state = state.write().await;
+                                    state.push_alert(
+                                        InterestLevel::Alert,
+                                        AlertCategory::DefenseAction,
+                                        "Defense action triggered".into(),
+                                        serde_json::json!({"action": "alert_generated"}),
+                                    );
+                                }
                             }
                         });
                     }
@@ -188,7 +212,7 @@ fn run_capture_loop(config: DaemonConfig, state: SharedState) {
 }
 
 #[cfg(feature = "libpcap")]
-fn run_capture_loop(config: DaemonConfig, state: SharedState) {
+fn run_capture_loop(config: DaemonConfig, state: SharedState, _injector: Option<Arc<tokio::sync::Mutex<DefenseInjector>>>) {
     // Create capture
     let mut cap = match Capture::new(&config.interface) {
         Ok(c) => c,
@@ -231,18 +255,41 @@ fn run_capture_loop(config: DaemonConfig, state: SharedState) {
                             })
                         };
 
-                        // Push alerts to state
+                        // Push alerts to state and check for defense execution
                         if !alerts.is_empty() {
                             let rt = tokio::runtime::Handle::current();
                             rt.block_on(async {
-                                let mut state = state.write().await;
-                                for alert in alerts {
-                                    state.push_alert(
-                                        alert.level,
-                                        alert.category,
-                                        alert.summary,
-                                        alert.details,
-                                    );
+                                // First push all alerts
+                                {
+                                    let mut state = state.write().await;
+                                    for alert in &alerts {
+                                        state.push_alert(
+                                            alert.level.clone(),
+                                            alert.category.clone(),
+                                            alert.summary.clone(),
+                                            alert.details.clone(),
+                                        );
+                                    }
+                                }
+
+                                // Check if we should execute defense
+                                let state_read = state.read().await;
+                                let should_block = state_read.defense_mode == DefenseMode::AutoBlock;
+                                let has_threat = alerts.iter().any(|a|
+                                    matches!(a.category, AlertCategory::ThreatMatch | AlertCategory::ArpSpoof)
+                                );
+                                drop(state_read);
+
+                                if should_block && has_threat {
+                                    if let Some(ref _inj) = _injector {
+                                        let mut state = state.write().await;
+                                        state.push_alert(
+                                            InterestLevel::Alert,
+                                            AlertCategory::DefenseAction,
+                                            "Defense action triggered".into(),
+                                            serde_json::json!({"action": "alert_generated"}),
+                                        );
+                                    }
                                 }
                             });
                         }
