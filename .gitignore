@@ -20,3 +20,6 @@ target/
 *.pcapng
 *.client_uuid
 *.lib
+
+# Git worktrees
+.worktrees/
