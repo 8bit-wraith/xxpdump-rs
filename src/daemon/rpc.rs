@@ -127,6 +127,10 @@ async fn handle_request(req: RpcRequest, state: &SharedState) -> RpcResponse {
         "defense.unblock" => handle_defense_unblock(&req.params, state).await,
         "status" => handle_status(state).await,
         "ping" => Ok(serde_json::json!("pong")),
+        "threat.add" => handle_threat_add(&req.params, state).await,
+        "threat.remove" => handle_threat_remove(&req.params, state).await,
+        "threat.list" => handle_threat_list(state).await,
+        "threat.enable" => handle_threat_enable(&req.params, state).await,
         _ => Err(RpcError {
             code: -32601,
             message: format!("Method not found: {}", req.method),
@@ -495,5 +499,145 @@ fn parse_duration(s: &str) -> Option<u64> {
         s[..s.len() - 1].parse::<u64>().ok().map(|v| v * 3_600_000)
     } else {
         s.parse().ok()
+    }
+}
+
+async fn handle_threat_add(
+    params: &Option<serde_json::Value>,
+    state: &SharedState,
+) -> Result<serde_json::Value, RpcError> {
+    use super::state::ThreatRule;
+
+    let params = params.as_ref().ok_or_else(|| RpcError {
+        code: -32602,
+        message: "Missing parameters".into(),
+    })?;
+
+    let rule_type = params
+        .get("type")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| RpcError {
+            code: -32602,
+            message: "Missing 'type' parameter".into(),
+        })?;
+
+    let rule = match rule_type {
+        "block_mac" => {
+            let mac = params.get("mac").and_then(|v| v.as_str()).ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing 'mac' for block_mac".into(),
+            })?;
+            let reason = params.get("reason").and_then(|v| v.as_str()).unwrap_or("LLM rule");
+            ThreatRule::BlockMac { mac: mac.into(), reason: reason.into() }
+        }
+        "block_ip" => {
+            let ip: IpAddr = params
+                .get("ip")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse().ok())
+                .ok_or_else(|| RpcError {
+                    code: -32602,
+                    message: "Missing or invalid 'ip' for block_ip".into(),
+                })?;
+            let reason = params.get("reason").and_then(|v| v.as_str()).unwrap_or("LLM rule");
+            ThreatRule::BlockIp { ip, reason: reason.into() }
+        }
+        "block_ip_range" => {
+            let cidr = params.get("cidr").and_then(|v| v.as_str()).ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing 'cidr' for block_ip_range".into(),
+            })?;
+            let reason = params.get("reason").and_then(|v| v.as_str()).unwrap_or("LLM rule");
+            ThreatRule::BlockIpRange { cidr: cidr.into(), reason: reason.into() }
+        }
+        "arp_spoof" => ThreatRule::ArpSpoofDetect,
+        "port_scan" => {
+            let threshold = params.get("threshold").and_then(|v| v.as_u64()).unwrap_or(10) as u32;
+            let window = params.get("window_secs").and_then(|v| v.as_u64()).unwrap_or(60) as u32;
+            ThreatRule::PortScanDetect { threshold, window_secs: window }
+        }
+        "rate_limit" => {
+            let mac = params.get("mac").and_then(|v| v.as_str()).map(String::from);
+            let pps = params.get("pps_limit").and_then(|v| v.as_u64()).unwrap_or(1000) as u32;
+            ThreatRule::RateLimit { mac, pps_limit: pps }
+        }
+        "new_device" => ThreatRule::NewDeviceAlert,
+        "persistent" => {
+            let mac = params.get("mac").and_then(|v| v.as_str()).ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing 'mac' for persistent".into(),
+            })?;
+            let mins = params.get("alert_after_mins").and_then(|v| v.as_u64()).unwrap_or(30) as u32;
+            ThreatRule::PersistentDevice { mac: mac.into(), alert_after_mins: mins }
+        }
+        _ => {
+            return Err(RpcError {
+                code: -32602,
+                message: format!("Unknown threat type: {}", rule_type),
+            });
+        }
+    };
+
+    let mut state = state.write().await;
+    let id = state.add_threat(rule);
+
+    Ok(serde_json::json!({ "threat_id": id }))
+}
+
+async fn handle_threat_remove(
+    params: &Option<serde_json::Value>,
+    state: &SharedState,
+) -> Result<serde_json::Value, RpcError> {
+    let id = params
+        .as_ref()
+        .and_then(|p| p.get("id"))
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| RpcError {
+            code: -32602,
+            message: "Missing 'id' parameter".into(),
+        })?;
+
+    let mut state = state.write().await;
+    let removed = state.remove_threat(id);
+
+    Ok(serde_json::json!({ "removed": removed }))
+}
+
+async fn handle_threat_list(state: &SharedState) -> Result<serde_json::Value, RpcError> {
+    let state = state.read().await;
+    serde_json::to_value(&state.threats).map_err(|e| RpcError {
+        code: -32000,
+        message: format!("Serialization error: {}", e),
+    })
+}
+
+async fn handle_threat_enable(
+    params: &Option<serde_json::Value>,
+    state: &SharedState,
+) -> Result<serde_json::Value, RpcError> {
+    let id = params
+        .as_ref()
+        .and_then(|p| p.get("id"))
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| RpcError {
+            code: -32602,
+            message: "Missing 'id' parameter".into(),
+        })?;
+
+    let enabled = params
+        .as_ref()
+        .and_then(|p| p.get("enabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let mut state = state.write().await;
+    if let Some(entry) = state.threats.iter_mut().find(|t| t.id == id) {
+        entry.enabled = enabled;
+        Ok(serde_json::json!({ "id": id, "enabled": enabled }))
+    } else {
+        Err(RpcError {
+            code: -32000,
+            message: format!("Threat {} not found", id),
+        })
     }
 }
