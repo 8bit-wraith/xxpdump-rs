@@ -32,19 +32,21 @@ cargo test test_name
 
 ## Architecture
 
-Four operational modes managed in `src/main.rs`:
+Five operational modes managed in `src/main.rs`:
 
 | Mode | File | Purpose |
 |------|------|---------|
 | local | `local.rs` | Capture packets from local interfaces |
 | client | `client.rs` | Capture locally, stream to remote server via TCP |
 | server | `server.rs` | Receive packets from clients, write to files |
+| daemon | `daemon/` | LLM-queryable sensor with JSON-RPC + Avahi |
 | - | `split.rs` | File rotation logic (time/size/count-based) |
 
 **Data flow:**
 - Local: `Capture → pcapng blocks → SplitRule → file(s)`
 - Client: `Capture → pcapng blocks → bincode serialize → TCP → server`
 - Server: `TCP → bincode deserialize → SplitRule → file(s)`
+- Daemon: `Capture → analyze → NetworkState → JSON-RPC queries`
 
 **Remote protocol:** Custom binary format over TCP:
 - 4 bytes length (big-endian u32) + bincode-encoded `PcapNgTransport`
@@ -72,3 +74,42 @@ Four operational modes managed in `src/main.rs`:
 ## Windows Development
 
 Requires npcap SDK. Set `$env:LIB` to point to `Packet.lib` location before building.
+
+## Daemon Mode (LLM Sensor)
+
+For WiFAKE integration. Captures packets, analyzes locally, serves JSON-RPC on port 12346.
+
+```bash
+# Start daemon
+sudo widump --mode daemon -i eth0
+
+# With active defense
+sudo widump --mode daemon -i eth0 --defense-mode block
+```
+
+**Daemon modules** (`src/daemon/`):
+- `state.rs` - NetworkState, FlowKey, DeviceProfile, alerts, watches
+- `analyzer.rs` - Packet → flow/device updates, ARP spoof & port scan detection
+- `rpc.rs` - JSON-RPC server (TCP)
+- `avahi.rs` - mDNS advertisement (`_widump._tcp`)
+- `defense.rs` - Active packet injection (ARP correction, TCP RST)
+
+**JSON-RPC Methods:**
+| Method | Purpose |
+|--------|---------|
+| `summary` | Device count, top talkers, protocol distribution |
+| `alerts` | Recent security alerts |
+| `device.profile` | Details for specific MAC |
+| `device.list` | All known devices |
+| `watch.add` | Add LLM-defined watch rule |
+| `defense.mode` | Set defense level (log/alert/block) |
+| `defense.block` | Block specific MAC/IP |
+
+**Interest Levels** (alert severity):
+| Level | Name | Push? |
+|-------|------|-------|
+| 0 | critical | immediate |
+| 1 | alert | <5s |
+| 2 | change | on-request |
+| 3 | summary | on-request |
+| 4 | debug | on-request |

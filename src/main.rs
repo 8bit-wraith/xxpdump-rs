@@ -39,12 +39,15 @@ use tracing::warn;
 use tracing_subscriber::FmtSubscriber;
 
 mod client;
+mod daemon;
 mod local;
 mod server;
 mod split;
 
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use client::capture_remote_client;
+#[cfg(any(feature = "libpnet", feature = "libpcap"))]
+use daemon::{run_daemon, DaemonConfig};
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
 use local::capture_local;
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
@@ -156,6 +159,24 @@ struct Args {
     /// Show ethernet layer info
     #[arg(short = 'e', long, action, default_value_t = false)]
     show_ethernet: bool,
+
+    // === Daemon mode options ===
+
+    /// RPC server address for daemon mode
+    #[arg(long, alias = "rpc", default_value = "0.0.0.0:12346")]
+    rpc_addr: String,
+
+    /// Advertise service via Avahi/mDNS
+    #[arg(long, action, default_value_t = true)]
+    advertise: bool,
+
+    /// Service name for mDNS advertisement
+    #[arg(long)]
+    service_name: Option<String>,
+
+    /// Defense mode: log, alert, or block
+    #[arg(long, alias = "dm", default_value = "log")]
+    defense_mode: String,
 }
 
 #[cfg(any(feature = "libpnet", feature = "libpcap"))]
@@ -317,6 +338,9 @@ fn quitting(mode: &str) {
             };
             info!("packets server recved [{}]", total_recved);
         }
+        "daemon" => {
+            info!("daemon shutting down");
+        }
         _ => (),
     }
 
@@ -389,6 +413,30 @@ async fn main() -> Result<()> {
         }
         "server" => {
             capture_remote_server(args).await?;
+        }
+        "daemon" => {
+            let defense = match args.defense_mode.as_str() {
+                "alert" => daemon::state::DefenseMode::Alert,
+                "block" | "auto" => daemon::state::DefenseMode::AutoBlock,
+                _ => daemon::state::DefenseMode::Log,
+            };
+            let config = DaemonConfig {
+                interface: args.interface.clone(),
+                rpc_addr: args.rpc_addr.clone(),
+                advertise: args.advertise,
+                service_name: args.service_name.clone().unwrap_or_else(|| {
+                    format!("widump-{}", hostname::get()
+                        .ok()
+                        .and_then(|h| h.into_string().ok())
+                        .unwrap_or_else(|| "unknown".into()))
+                }),
+                defense_mode: defense,
+                filter: args.filter.clone(),
+                promisc: args.promisc,
+                buffer_size: args.buffer_size,
+                snaplen: args.snaplen,
+            };
+            run_daemon(config).await?;
         }
         _ => panic!("unsupported mode"),
     }
